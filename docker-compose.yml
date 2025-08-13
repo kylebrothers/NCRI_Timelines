@@ -1,0 +1,52 @@
+services:
+  asana-integration:
+    build: .
+    container_name: asana-integration-app
+    ports:
+      - "${HOST_PORT:-5000}:5000"
+    environment:
+      - FLASK_ENV=production
+      - FLASK_DEBUG=false
+      - ASANA_ACCESS_TOKEN=${ASANA_ACCESS_TOKEN}
+      - ASANA_WORKSPACE_GID=${ASANA_WORKSPACE_GID}
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-this}
+    volumes:
+      - asana_logs:/app/logs
+      - asana_server_files:/app/server_files
+      - asana_templates:/app/templates
+      - asana_static:/app/static
+      - asana_uploads:/app/uploads
+    restart: unless-stopped
+    networks:
+      - asana-network
+
+volumes:
+  asana_logs:
+    driver_opts:
+      type: nfs
+      device: ":/Docker/asana-integration/logs"
+      o: nfsvers=4,addr=${NAS_IP:-192.168.0.134},nolock,soft,rw
+  asana_server_files:
+    driver_opts:
+      type: nfs
+      device: ":/Docker/asana-integration/server_files"
+      o: nfsvers=4,addr=${NAS_IP:-192.168.0.134},nolock,soft,rw
+  asana_templates:
+    driver_opts:
+      type: nfs
+      device: ":/Docker/asana-integration/templates"
+      o: nfsvers=4,addr=${NAS_IP:-192.168.0.134},nolock,soft,rw
+  asana_static:
+    driver_opts:
+      type: nfs
+      device: ":/Docker/asana-integration/static"
+      o: nfsvers=4,addr=${NAS_IP:-192.168.0.134},nolock,soft,rw
+  asana_uploads:
+    driver_opts:
+      type: nfs
+      device: ":/Docker/asana-integration/uploads"
+      o: nfsvers=4,addr=${NAS_IP:-192.168.0.134},nolock,soft,rw
+
+networks:
+  asana-network:
+    driver: bridge

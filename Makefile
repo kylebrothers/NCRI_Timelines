@@ -179,6 +179,28 @@ init: ## Initialize project (first time setup)
 	@$(MAKE) setup-nfs
 	@echo "$(GREEN)Initialization complete!$(NC)"
 
+setup-python: ## Setup Python environment for testing (no Docker needed)
+	@echo "$(GREEN)Setting up Python environment for API testing...$(NC)"
+	@echo "Checking Python version..."
+	@$(PYTHON) --version
+	@echo ""
+	@echo "$(YELLOW)Installing minimal requirements for API testing...$(NC)"
+	@$(PIP) install python-asana python-dotenv
+	@echo ""
+	@echo "$(GREEN)Python environment ready!$(NC)"
+	@echo "You can now run: $(YELLOW)make test-api$(NC)"
+
+setup-venv: ## Create and setup Python virtual environment
+	@echo "$(GREEN)Creating Python virtual environment...$(NC)"
+	@$(PYTHON) -m venv venv
+	@echo "$(GREEN)Virtual environment created!$(NC)"
+	@echo ""
+	@echo "$(YELLOW)To activate the virtual environment, run:$(NC)"
+	@echo "  $(GREEN)source venv/bin/activate$(NC) (Linux/Mac)"
+	@echo "  $(GREEN)venv\\Scripts\\activate$(NC) (Windows)"
+	@echo ""
+	@echo "Then run: $(YELLOW)make install$(NC) to install dependencies"
+
 setup-nfs: ## Setup NFS directories on NAS
 	@echo "$(GREEN)Setting up NFS directories...$(NC)"
 	@echo "Creating directories on NAS at $(NAS_IP)..."

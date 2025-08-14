@@ -87,10 +87,20 @@ def test_asana_connection():
     # Test 1: Get current user
     print_colored("\n3. Testing API access - Getting current user...", YELLOW)
     try:
-        user = users_api.get_user('me', {})
+        user_response = users_api.get_user('me', {})
+        # Handle both dict and object responses
+        if hasattr(user_response, 'data'):
+            user = user_response.data
+            user_name = user.name if hasattr(user, 'name') else user.get('name', 'Unknown')
+            user_email = user.email if hasattr(user, 'email') else user.get('email', 'Not available')
+        else:
+            user = user_response
+            user_name = user.get('name', 'Unknown')
+            user_email = user.get('email', 'Not available')
+        
         print_colored("   ✓ API access confirmed!", GREEN)
-        print_colored(f"   Logged in as: {user.data.name}", NC)
-        print_colored(f"   Email: {user.data.email if hasattr(user.data, 'email') else 'Not available'}", NC)
+        print_colored(f"   Logged in as: {user_name}", NC)
+        print_colored(f"   Email: {user_email}", NC)
     except Exception as e:
         print_colored(f"   ✗ API access failed: {e}", RED)
         print_colored("   Please check your access token is valid", NC)
@@ -100,12 +110,19 @@ def test_asana_connection():
     print_colored("\n4. Fetching available workspaces...", YELLOW)
     try:
         workspaces_response = workspaces_api.get_workspaces({})
-        workspaces = workspaces_response.data
+        # Handle both response types
+        if hasattr(workspaces_response, 'data'):
+            workspaces = workspaces_response.data
+        else:
+            workspaces = workspaces_response
+        
         print_colored(f"   ✓ Found {len(workspaces)} workspace(s):", GREEN)
         
         for ws in workspaces:
-            ws_info = f"   - {ws.name} (GID: {ws.gid})"
-            if workspace_gid and ws.gid == workspace_gid:
+            ws_name = ws.name if hasattr(ws, 'name') else ws.get('name', 'Unknown')
+            ws_gid = ws.gid if hasattr(ws, 'gid') else ws.get('gid', 'Unknown')
+            ws_info = f"   - {ws_name} (GID: {ws_gid})"
+            if workspace_gid and ws_gid == workspace_gid:
                 print_colored(ws_info + " [CONFIGURED]", GREEN)
             else:
                 print_colored(ws_info, NC)
@@ -113,8 +130,9 @@ def test_asana_connection():
         # If no workspace configured, use first one
         if not workspace_gid or workspace_gid == 'your-workspace-gid':
             if workspaces:
-                workspace_gid = workspaces[0].gid
-                print_colored(f"\n   Using first workspace: {workspaces[0].name}", YELLOW)
+                workspace_gid = workspaces[0].gid if hasattr(workspaces[0], 'gid') else workspaces[0].get('gid')
+                ws_name = workspaces[0].name if hasattr(workspaces[0], 'name') else workspaces[0].get('name')
+                print_colored(f"\n   Using first workspace: {ws_name}", YELLOW)
             else:
                 print_colored("   ✗ No workspaces available!", RED)
                 return False

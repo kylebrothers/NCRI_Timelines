@@ -103,6 +103,10 @@ test: ## Run tests
 		$(MAKE) create-tests; \
 	fi
 
+test-api: ## Test Asana API connection
+	@echo "$(GREEN)Testing Asana API connection...$(NC)"
+	@$(PYTHON) test_asana_connection.py
+
 test-coverage: ## Run tests with coverage report
 	@echo "$(GREEN)Running tests with coverage...$(NC)"
 	$(PYTHON) -m pytest tests/ --cov=. --cov-report=html --cov-report=term
@@ -204,6 +208,9 @@ check-env: ## Verify environment configuration
 		echo "$(GREEN)✓ Workspace GID configured$(NC)"; \
 	fi
 
+test-connection: test-api ## Alias for test-api
+	@echo ""
+
 ## Deployment
 deploy: ## Full deployment (build, test, and start)
 	@echo "$(GREEN)Starting full deployment...$(NC)"
@@ -274,7 +281,10 @@ export-tasks: ## Export tasks to CSV
 	@echo "$(GREEN)Tasks exported to exports/tasks_$$timestamp.csv$(NC)"
 
 ## Quick Commands
-quick-start: init deploy ## Quick start for new installations
+test-quick: ## Quick API connection test (no Docker needed)
+	@$(PYTHON) test_asana_connection.py
+
+quick-start: init test-api deploy ## Quick start for new installations
 	@echo "$(GREEN)Quick start complete!$(NC)"
 
 rebuild: down build up ## Rebuild and restart everything

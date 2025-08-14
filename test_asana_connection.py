@@ -69,8 +69,16 @@ def test_asana_connection():
     # Initialize Asana client
     print_colored("\n2. Initializing Asana client...", YELLOW)
     try:
-        client = asana.Client.access_token(access_token)
-        client.options['max_retries'] = 3
+        configuration = asana.Configuration()
+        configuration.access_token = access_token
+        api_client = asana.ApiClient(configuration)
+        
+        # Create API instances
+        users_api = asana.UsersApi(api_client)
+        workspaces_api = asana.WorkspacesApi(api_client)
+        projects_api = asana.ProjectsApi(api_client)
+        tasks_api = asana.TasksApi(api_client)
+        
         print_colored("   ✓ Client initialized", GREEN)
     except Exception as e:
         print_colored(f"   ✗ Failed to initialize client: {e}", RED)
@@ -79,10 +87,10 @@ def test_asana_connection():
     # Test 1: Get current user
     print_colored("\n3. Testing API access - Getting current user...", YELLOW)
     try:
-        user = client.users.get_user('me')
+        user = users_api.get_user('me')
         print_colored("   ✓ API access confirmed!", GREEN)
-        print_colored(f"   Logged in as: {user.get('name', 'Unknown')}", NC)
-        print_colored(f"   Email: {user.get('email', 'Not available')}", NC)
+        print_colored(f"   Logged in as: {user.data.name}", NC)
+        print_colored(f"   Email: {user.data.email if hasattr(user.data, 'email') else 'Not available'}", NC)
     except Exception as e:
         print_colored(f"   ✗ API access failed: {e}", RED)
         print_colored("   Please check your access token is valid", NC)
@@ -91,12 +99,13 @@ def test_asana_connection():
     # Test 2: List workspaces
     print_colored("\n4. Fetching available workspaces...", YELLOW)
     try:
-        workspaces = list(client.workspaces.get_workspaces())
+        workspaces_response = workspaces_api.get_workspaces()
+        workspaces = workspaces_response.data
         print_colored(f"   ✓ Found {len(workspaces)} workspace(s):", GREEN)
         
         for ws in workspaces:
-            ws_info = f"   - {ws['name']} (GID: {ws['gid']})"
-            if workspace_gid and ws['gid'] == workspace_gid:
+            ws_info = f"   - {ws.name} (GID: {ws.gid})"
+            if workspace_gid and ws.gid == workspace_gid:
                 print_colored(ws_info + " [CONFIGURED]", GREEN)
             else:
                 print_colored(ws_info, NC)
@@ -104,8 +113,8 @@ def test_asana_connection():
         # If no workspace configured, use first one
         if not workspace_gid or workspace_gid == 'your-workspace-gid':
             if workspaces:
-                workspace_gid = workspaces[0]['gid']
-                print_colored(f"\n   Using first workspace: {workspaces[0]['name']}", YELLOW)
+                workspace_gid = workspaces[0].gid
+                print_colored(f"\n   Using first workspace: {workspaces[0].name}", YELLOW)
             else:
                 print_colored("   ✗ No workspaces available!", RED)
                 return False
@@ -116,9 +125,9 @@ def test_asana_connection():
     # Test 3: Get workspace details
     print_colored("\n5. Getting workspace details...", YELLOW)
     try:
-        workspace = client.workspaces.get_workspace(workspace_gid)
-        print_colored(f"   ✓ Workspace: {workspace.get('name')}", GREEN)
-        print_colored(f"   Type: {'Organization' if workspace.get('is_organization') else 'Workspace'}", NC)
+        workspace = workspaces_api.get_workspace(workspace_gid)
+        print_colored(f"   ✓ Workspace: {workspace.data.name}", GREEN)
+        print_colored(f"   Type: {'Organization' if getattr(workspace.data, 'is_organization', False) else 'Workspace'}", NC)
     except Exception as e:
         print_colored(f"   ✗ Failed to get workspace details: {e}", RED)
         return False
@@ -126,12 +135,13 @@ def test_asana_connection():
     # Test 4: List projects
     print_colored("\n6. Fetching projects...", YELLOW)
     try:
-        projects = list(client.projects.get_projects({'workspace': workspace_gid, 'limit': 5}))
+        projects_response = projects_api.get_projects(workspace=workspace_gid, limit=5)
+        projects = projects_response.data
         print_colored(f"   ✓ Found {len(projects)} project(s) (showing max 5):", GREEN)
         
         if projects:
             for project in projects:
-                print_colored(f"   - {project.get('name', 'Unnamed')}", NC)
+                print_colored(f"   - {project.name}", NC)
         else:
             print_colored("   No projects found (this is normal for new workspaces)", YELLOW)
     except Exception as e:
@@ -141,11 +151,12 @@ def test_asana_connection():
     # Test 5: List users
     print_colored("\n7. Fetching workspace users...", YELLOW)
     try:
-        users = list(client.users.get_users({'workspace': workspace_gid, 'limit': 5}))
+        users_response = users_api.get_users(workspace=workspace_gid, limit=5)
+        users = users_response.data
         print_colored(f"   ✓ Found {len(users)} user(s) (showing max 5):", GREEN)
         
         for user in users:
-            print_colored(f"   - {user.get('name', 'Unknown')}", NC)
+            print_colored(f"   - {user.name}", NC)
     except Exception as e:
         print_colored(f"   ✗ Failed to fetch users: {e}", RED)
         # This is not a critical error
@@ -154,16 +165,20 @@ def test_asana_connection():
     print_colored("\n8. Testing write access...", YELLOW)
     try:
         # Create a test task
-        test_task = client.tasks.create_task({
-            'name': f'API Test Task - {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
-            'notes': 'This is a test task created by the API connection test script.',
-            'workspace': workspace_gid
-        })
+        task_data = {
+            'data': {
+                'name': f'API Test Task - {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+                'notes': 'This is a test task created by the API connection test script.',
+                'workspace': workspace_gid
+            }
+        }
+        
+        test_task = tasks_api.create_task(task_data)
         print_colored("   ✓ Successfully created test task", GREEN)
-        print_colored(f"   Task GID: {test_task.get('gid')}", NC)
+        print_colored(f"   Task GID: {test_task.data.gid}", NC)
         
         # Delete the test task
-        client.tasks.delete_task(test_task['gid'])
+        tasks_api.delete_task(test_task.data.gid)
         print_colored("   ✓ Successfully deleted test task", GREEN)
         print_colored("   Write access confirmed!", GREEN)
     except Exception as e:
@@ -177,7 +192,7 @@ def test_asana_connection():
     
     print_colored("\nSummary:", BLUE)
     print_colored(f"  • API Token: Valid", GREEN)
-    print_colored(f"  • Workspace: {workspace.get('name', 'Connected')}", GREEN)
+    print_colored(f"  • Workspace: {workspace.data.name}", GREEN)
     print_colored(f"  • Access Level: {'Read/Write' if 'test_task' in locals() else 'Read'}", GREEN)
     print_colored(f"  • Projects Available: {len(projects) if 'projects' in locals() else 0}", NC)
     print_colored(f"  • Users in Workspace: {len(users) if 'users' in locals() else 0}", NC)

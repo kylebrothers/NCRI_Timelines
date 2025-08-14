@@ -110,11 +110,11 @@ def test_asana_connection():
     print_colored("\n4. Fetching available workspaces...", YELLOW)
     try:
         workspaces_response = workspaces_api.get_workspaces({})
-        # Handle both response types
+        # Handle both response types and convert to list
         if hasattr(workspaces_response, 'data'):
-            workspaces = workspaces_response.data
+            workspaces = list(workspaces_response.data)
         else:
-            workspaces = workspaces_response
+            workspaces = list(workspaces_response)
         
         print_colored(f"   ✓ Found {len(workspaces)} workspace(s):", GREEN)
         

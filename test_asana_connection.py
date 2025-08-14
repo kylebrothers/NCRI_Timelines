@@ -143,9 +143,19 @@ def test_asana_connection():
     # Test 3: Get workspace details
     print_colored("\n5. Getting workspace details...", YELLOW)
     try:
-        workspace = workspaces_api.get_workspace(workspace_gid, {})
-        print_colored(f"   ✓ Workspace: {workspace.data.name}", GREEN)
-        print_colored(f"   Type: {'Organization' if getattr(workspace.data, 'is_organization', False) else 'Workspace'}", NC)
+        workspace_response = workspaces_api.get_workspace(workspace_gid, {})
+        # Handle both response types
+        if hasattr(workspace_response, 'data'):
+            workspace = workspace_response.data
+            ws_name = workspace.name if hasattr(workspace, 'name') else workspace.get('name')
+            is_org = workspace.is_organization if hasattr(workspace, 'is_organization') else workspace.get('is_organization', False)
+        else:
+            workspace = workspace_response
+            ws_name = workspace.get('name', 'Unknown')
+            is_org = workspace.get('is_organization', False)
+        
+        print_colored(f"   ✓ Workspace: {ws_name}", GREEN)
+        print_colored(f"   Type: {'Organization' if is_org else 'Workspace'}", NC)
     except Exception as e:
         print_colored(f"   ✗ Failed to get workspace details: {e}", RED)
         return False
@@ -154,12 +164,18 @@ def test_asana_connection():
     print_colored("\n6. Fetching projects...", YELLOW)
     try:
         projects_response = projects_api.get_projects({'workspace': workspace_gid, 'limit': 5})
-        projects = projects_response.data
+        # Handle both response types and convert to list
+        if hasattr(projects_response, 'data'):
+            projects = list(projects_response.data)
+        else:
+            projects = list(projects_response)
+        
         print_colored(f"   ✓ Found {len(projects)} project(s) (showing max 5):", GREEN)
         
         if projects:
             for project in projects:
-                print_colored(f"   - {project.name}", NC)
+                proj_name = project.name if hasattr(project, 'name') else project.get('name', 'Unnamed')
+                print_colored(f"   - {proj_name}", NC)
         else:
             print_colored("   No projects found (this is normal for new workspaces)", YELLOW)
     except Exception as e:
@@ -170,11 +186,17 @@ def test_asana_connection():
     print_colored("\n7. Fetching workspace users...", YELLOW)
     try:
         users_response = users_api.get_users({'workspace': workspace_gid, 'limit': 5})
-        users = users_response.data
+        # Handle both response types and convert to list
+        if hasattr(users_response, 'data'):
+            users = list(users_response.data)
+        else:
+            users = list(users_response)
+        
         print_colored(f"   ✓ Found {len(users)} user(s) (showing max 5):", GREEN)
         
         for user in users:
-            print_colored(f"   - {user.name}", NC)
+            user_name = user.name if hasattr(user, 'name') else user.get('name', 'Unknown')
+            print_colored(f"   - {user_name}", NC)
     except Exception as e:
         print_colored(f"   ✗ Failed to fetch users: {e}", RED)
         # This is not a critical error
@@ -210,7 +232,7 @@ def test_asana_connection():
     
     print_colored("\nSummary:", BLUE)
     print_colored(f"  • API Token: Valid", GREEN)
-    print_colored(f"  • Workspace: {workspace.data.name}", GREEN)
+    print_colored(f"  • Workspace: {ws_name if 'ws_name' in locals() else 'Connected'}", GREEN)
     print_colored(f"  • Access Level: {'Read/Write' if 'test_task' in locals() else 'Read'}", GREEN)
     print_colored(f"  • Projects Available: {len(projects) if 'projects' in locals() else 0}", NC)
     print_colored(f"  • Users in Workspace: {len(users) if 'users' in locals() else 0}", NC)

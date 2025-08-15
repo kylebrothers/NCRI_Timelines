@@ -1,6 +1,6 @@
 # requirements.txt
 Flask==3.0.0
-python-asana==5.0.0
+asana==5.0.0
 Flask-Limiter==3.5.0
 python-dotenv==1.0.0
 Werkzeug==3.0.1

@@ -1,55 +1,72 @@
 """
-Asana API client wrapper for simplified operations
+Asana API client wrapper for read-only operations
 """
 
 import os
 import logging
 import asana
 from typing import Dict, List, Optional, Any
-from datetime import datetime, timedelta
-import time
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 class AsanaClient:
-    """Wrapper class for Asana API operations"""
+    """Wrapper class for Asana API read-only operations"""
     
     def __init__(self):
         """Initialize Asana client with environment credentials"""
-        self.client = None
+        self.api_client = None
         self.workspace_gid = os.environ.get('ASANA_WORKSPACE_GID')
         self.access_token = os.environ.get('ASANA_ACCESS_TOKEN')
         
+        # API instances
+        self.users_api = None
+        self.workspaces_api = None
+        self.projects_api = None
+        self.tasks_api = None
+        self.sections_api = None
+        self.tags_api = None
+        self.custom_fields_api = None
+        
         if self.access_token:
             try:
-                self.client = asana.Client.access_token(self.access_token)
-                # Enable auto-retry for rate limits
-                self.client.options['max_retries'] = 3
-                self.client.options['full_payload'] = True
+                # Initialize with modern API format
+                configuration = asana.Configuration()
+                configuration.access_token = self.access_token
+                self.api_client = asana.ApiClient(configuration)
                 
-                # Test connection
+                # Create API instances
+                self.users_api = asana.UsersApi(self.api_client)
+                self.workspaces_api = asana.WorkspacesApi(self.api_client)
+                self.projects_api = asana.ProjectsApi(self.api_client)
+                self.tasks_api = asana.TasksApi(self.api_client)
+                self.sections_api = asana.SectionsApi(self.api_client)
+                self.tags_api = asana.TagsApi(self.api_client)
+                self.custom_fields_api = asana.CustomFieldsApi(self.api_client)
+                
+                # Test connection and get workspace
                 if self.workspace_gid:
-                    self.client.workspaces.get_workspace(self.workspace_gid)
+                    workspace = self.workspaces_api.get_workspace(self.workspace_gid, {})
                     logger.info(f"Asana client initialized for workspace: {self.workspace_gid}")
                 else:
                     # Get first available workspace
-                    workspaces = list(self.client.workspaces.get_workspaces())
+                    workspaces = list(self.workspaces_api.get_workspaces({}))
                     if workspaces:
-                        self.workspace_gid = workspaces[0]['gid']
+                        self.workspace_gid = workspaces[0].get('gid') if isinstance(workspaces[0], dict) else workspaces[0].gid
                         logger.info(f"Using first available workspace: {self.workspace_gid}")
                     else:
                         logger.error("No workspaces available")
-                        self.client = None
+                        self.api_client = None
                         
             except Exception as e:
                 logger.error(f"Failed to initialize Asana client: {e}")
-                self.client = None
+                self.api_client = None
         else:
             logger.warning("No Asana access token provided")
     
     def is_connected(self) -> bool:
         """Check if client is connected to Asana"""
-        return self.client is not None
+        return self.api_client is not None
     
     def get_workspace_info(self) -> Optional[Dict]:
         """Get current workspace information"""
@@ -57,178 +74,92 @@ class AsanaClient:
             return None
         
         try:
-            workspace = self.client.workspaces.get_workspace(self.workspace_gid)
-            return {
-                'gid': workspace['gid'],
-                'name': workspace['name'],
-                'is_organization': workspace.get('is_organization', False)
-            }
+            workspace = self.workspaces_api.get_workspace(self.workspace_gid, {})
+            # Handle both dict and object responses
+            if isinstance(workspace, dict):
+                return workspace
+            else:
+                return {
+                    'gid': workspace.gid if hasattr(workspace, 'gid') else workspace.get('gid'),
+                    'name': workspace.name if hasattr(workspace, 'name') else workspace.get('name'),
+                    'is_organization': workspace.is_organization if hasattr(workspace, 'is_organization') else workspace.get('is_organization', False)
+                }
         except Exception as e:
             logger.error(f"Error fetching workspace info: {e}")
             return None
     
-    # Task Operations
-    def create_task(self, task_data: Dict[str, Any]) -> Dict:
-        """Create a new task"""
+    # Project Operations (Read-Only)
+    def find_project_by_name(self, project_name: str) -> Optional[Dict]:
+        """Find a project by name (searches through projects)"""
         if not self.is_connected():
             raise Exception("Asana client not connected")
         
         try:
-            # Add workspace if not specified
-            if 'workspace' not in task_data:
-                task_data['workspace'] = self.workspace_gid
+            logger.info(f"Searching for project: {project_name}")
+            # Iterate through projects to find match
+            for project in self.projects_api.get_projects({'workspace': self.workspace_gid}):
+                # Handle both dict and object responses
+                if isinstance(project, dict):
+                    proj_name = project.get('name', '')
+                    proj_gid = project.get('gid')
+                else:
+                    proj_name = project.name if hasattr(project, 'name') else ''
+                    proj_gid = project.gid if hasattr(project, 'gid') else None
+                
+                if project_name.lower() in proj_name.lower():
+                    logger.info(f"Found project: {proj_name} (GID: {proj_gid})")
+                    return {
+                        'gid': proj_gid,
+                        'name': proj_name
+                    }
             
-            # Handle file attachments if present
-            attachments = task_data.pop('attachments', [])
-            
-            # Create the task
-            result = self.client.tasks.create_task(task_data)
-            
-            # Add attachments if any
-            if attachments and result.get('gid'):
-                for attachment in attachments:
-                    self.attach_file_to_task(result['gid'], attachment)
-            
-            logger.info(f"Task created: {result.get('gid')}")
-            return result
+            logger.warning(f"Project not found: {project_name}")
+            return None
             
         except Exception as e:
-            logger.error(f"Error creating task: {e}")
-            raise
-    
-    def get_task(self, task_gid: str) -> Dict:
-        """Get task details"""
-        if not self.is_connected():
-            raise Exception("Asana client not connected")
-        
-        try:
-            return self.client.tasks.get_task(task_gid)
-        except Exception as e:
-            logger.error(f"Error fetching task {task_gid}: {e}")
-            raise
-    
-    def update_task(self, task_gid: str, update_data: Dict[str, Any]) -> Dict:
-        """Update an existing task"""
-        if not self.is_connected():
-            raise Exception("Asana client not connected")
-        
-        try:
-            result = self.client.tasks.update_task(task_gid, update_data)
-            logger.info(f"Task updated: {task_gid}")
-            return result
-        except Exception as e:
-            logger.error(f"Error updating task {task_gid}: {e}")
-            raise
-    
-    def delete_task(self, task_gid: str) -> bool:
-        """Delete a task"""
-        if not self.is_connected():
-            raise Exception("Asana client not connected")
-        
-        try:
-            self.client.tasks.delete_task(task_gid)
-            logger.info(f"Task deleted: {task_gid}")
-            return True
-        except Exception as e:
-            logger.error(f"Error deleting task {task_gid}: {e}")
-            raise
-    
-    def add_comment_to_task(self, task_gid: str, comment_text: str) -> Dict:
-        """Add a comment to a task"""
-        if not self.is_connected():
-            raise Exception("Asana client not connected")
-        
-        try:
-            story = self.client.stories.create_story_for_task(
-                task_gid,
-                {'text': comment_text}
-            )
-            logger.info(f"Comment added to task {task_gid}")
-            return story
-        except Exception as e:
-            logger.error(f"Error adding comment to task {task_gid}: {e}")
-            raise
-    
-    def attach_file_to_task(self, task_gid: str, file_data: Dict) -> Dict:
-        """Attach a file to a task"""
-        if not self.is_connected():
-            raise Exception("Asana client not connected")
-        
-        try:
-            # file_data should contain 'file' (file object) and 'name'
-            attachment = self.client.attachments.create_attachment_for_task(
-                task_gid,
-                file=file_data['file'],
-                name=file_data.get('name', 'attachment')
-            )
-            logger.info(f"File attached to task {task_gid}")
-            return attachment
-        except Exception as e:
-            logger.error(f"Error attaching file to task {task_gid}: {e}")
-            raise
-    
-    # Project Operations
-    def get_projects(self) -> List[Dict]:
-        """Get all projects in workspace"""
-        if not self.is_connected():
-            raise Exception("Asana client not connected")
-        
-        try:
-            projects = list(self.client.projects.get_projects(
-                {'workspace': self.workspace_gid}
-            ))
-            return projects
-        except Exception as e:
-            logger.error(f"Error fetching projects: {e}")
+            logger.error(f"Error searching for project: {e}")
             raise
     
     def get_project(self, project_gid: str) -> Dict:
-        """Get project details"""
+        """Get project details by GID"""
         if not self.is_connected():
             raise Exception("Asana client not connected")
         
         try:
-            return self.client.projects.get_project(project_gid)
+            project = self.projects_api.get_project(project_gid, {})
+            # Handle both dict and object responses
+            if isinstance(project, dict):
+                return project
+            else:
+                # Convert object to dict
+                return self._object_to_dict(project)
         except Exception as e:
             logger.error(f"Error fetching project {project_gid}: {e}")
             raise
     
-    def create_project(self, project_data: Dict[str, Any]) -> Dict:
-        """Create a new project"""
-        if not self.is_connected():
-            raise Exception("Asana client not connected")
-        
-        try:
-            if 'workspace' not in project_data:
-                project_data['workspace'] = self.workspace_gid
-            
-            result = self.client.projects.create_project(project_data)
-            logger.info(f"Project created: {result.get('gid')}")
-            return result
-        except Exception as e:
-            logger.error(f"Error creating project: {e}")
-            raise
-    
     def get_project_tasks(self, project_gid: str, 
-                         completed_since: Optional[str] = None) -> List[Dict]:
-        """Get tasks for a project
-        
-        Args:
-            project_gid: The project GID
-            completed_since: Optional date string to include completed tasks
-        """
+                         completed_since: Optional[str] = None,
+                         limit: int = 100) -> List[Dict]:
+        """Get tasks for a specific project by GID"""
         if not self.is_connected():
             raise Exception("Asana client not connected")
         
         try:
-            params = {}
+            params = {'limit': limit}
             if completed_since:
                 params['completed_since'] = completed_since
             
-            tasks = list(self.client.tasks.get_tasks_for_project(
-                project_gid,
-                params
-            ))
+            tasks = []
+            for task in self.tasks_api.get_tasks_for_project(project_gid, params):
+                if isinstance(task, dict):
+                    tasks.append(task)
+                else:
+                    tasks.append(self._object_to_dict(task))
+                
+                # Stop at limit
+                if len(tasks) >= limit:
+                    break
+            
             return tasks
         except Exception as e:
             logger.error(f"Error fetching tasks for project {project_gid}: {e}")
@@ -240,50 +171,63 @@ class AsanaClient:
             raise Exception("Asana client not connected")
         
         try:
-            sections = list(self.client.sections.get_sections_for_project(project_gid))
+            sections = []
+            for section in self.sections_api.get_sections_for_project(project_gid, {}):
+                if isinstance(section, dict):
+                    sections.append(section)
+                else:
+                    sections.append(self._object_to_dict(section))
             return sections
         except Exception as e:
             logger.error(f"Error fetching sections for project {project_gid}: {e}")
             raise
     
-    def create_section(self, project_gid: str, section_name: str) -> Dict:
-        """Create a new section in a project"""
+    # Task Operations (Read-Only)
+    def get_task(self, task_gid: str) -> Dict:
+        """Get task details"""
         if not self.is_connected():
             raise Exception("Asana client not connected")
         
         try:
-            section = self.client.sections.create_section_for_project(
-                project_gid,
-                {'name': section_name}
-            )
-            logger.info(f"Section created in project {project_gid}: {section_name}")
-            return section
+            task = self.tasks_api.get_task(task_gid, {})
+            if isinstance(task, dict):
+                return task
+            else:
+                return self._object_to_dict(task)
         except Exception as e:
-            logger.error(f"Error creating section in project {project_gid}: {e}")
+            logger.error(f"Error fetching task {task_gid}: {e}")
             raise
     
-    # User Operations
-    def get_users(self) -> List[Dict]:
-        """Get all users in workspace"""
+    def get_task_stories(self, task_gid: str) -> List[Dict]:
+        """Get comments/stories for a task"""
         if not self.is_connected():
             raise Exception("Asana client not connected")
         
         try:
-            users = list(self.client.users.get_users(
-                {'workspace': self.workspace_gid}
-            ))
-            return users
+            stories = []
+            stories_api = asana.StoriesApi(self.api_client)
+            for story in stories_api.get_stories_for_task(task_gid, {}):
+                if isinstance(story, dict):
+                    stories.append(story)
+                else:
+                    stories.append(self._object_to_dict(story))
+            return stories
         except Exception as e:
-            logger.error(f"Error fetching users: {e}")
+            logger.error(f"Error fetching stories for task {task_gid}: {e}")
             raise
     
+    # User Operations (Read-Only)
     def get_user(self, user_gid: str) -> Dict:
         """Get user details"""
         if not self.is_connected():
             raise Exception("Asana client not connected")
         
         try:
-            return self.client.users.get_user(user_gid)
+            user = self.users_api.get_user(user_gid, {})
+            if isinstance(user, dict):
+                return user
+            else:
+                return self._object_to_dict(user)
         except Exception as e:
             logger.error(f"Error fetching user {user_gid}: {e}")
             raise
@@ -294,237 +238,54 @@ class AsanaClient:
             raise Exception("Asana client not connected")
         
         try:
-            return self.client.users.get_user('me')
+            user = self.users_api.get_user('me', {})
+            if isinstance(user, dict):
+                return user
+            else:
+                return self._object_to_dict(user)
         except Exception as e:
             logger.error(f"Error fetching current user: {e}")
             raise
     
-    # Tag Operations
-    def get_tags(self) -> List[Dict]:
-        """Get all tags in workspace"""
-        if not self.is_connected():
-            raise Exception("Asana client not connected")
-        
-        try:
-            tags = list(self.client.tags.get_tags(
-                {'workspace': self.workspace_gid}
-            ))
-            return tags
-        except Exception as e:
-            logger.error(f"Error fetching tags: {e}")
-            raise
-    
-    def create_tag(self, tag_name: str, color: Optional[str] = None) -> Dict:
-        """Create a new tag"""
-        if not self.is_connected():
-            raise Exception("Asana client not connected")
-        
-        try:
-            tag_data = {
-                'name': tag_name,
-                'workspace': self.workspace_gid
-            }
-            if color:
-                tag_data['color'] = color
-            
-            tag = self.client.tags.create_tag(tag_data)
-            logger.info(f"Tag created: {tag_name}")
-            return tag
-        except Exception as e:
-            logger.error(f"Error creating tag {tag_name}: {e}")
-            raise
-    
-    def add_tag_to_task(self, task_gid: str, tag_gid: str) -> bool:
-        """Add a tag to a task"""
-        if not self.is_connected():
-            raise Exception("Asana client not connected")
-        
-        try:
-            self.client.tasks.add_tag_for_task(task_gid, {'tag': tag_gid})
-            logger.info(f"Tag {tag_gid} added to task {task_gid}")
-            return True
-        except Exception as e:
-            logger.error(f"Error adding tag to task: {e}")
-            raise
-    
-    # Custom Field Operations
-    def get_custom_fields(self) -> List[Dict]:
-        """Get custom fields for workspace"""
-        if not self.is_connected():
-            raise Exception("Asana client not connected")
-        
-        try:
-            custom_fields = list(self.client.custom_fields.get_custom_fields_for_workspace(
-                self.workspace_gid
-            ))
-            return custom_fields
-        except Exception as e:
-            logger.error(f"Error fetching custom fields: {e}")
-            raise
-    
-    def get_custom_field(self, field_gid: str) -> Dict:
-        """Get custom field details"""
-        if not self.is_connected():
-            raise Exception("Asana client not connected")
-        
-        try:
-            return self.client.custom_fields.get_custom_field(field_gid)
-        except Exception as e:
-            logger.error(f"Error fetching custom field {field_gid}: {e}")
-            raise
-    
-    def update_custom_field_on_task(self, task_gid: str, field_gid: str, value: Any) -> bool:
-        """Update a custom field value on a task"""
-        if not self.is_connected():
-            raise Exception("Asana client not connected")
-        
-        try:
-            # Format value based on field type
-            custom_field_data = {field_gid: value}
-            
-            self.client.tasks.update_task(
-                task_gid,
-                {'custom_fields': custom_field_data}
-            )
-            logger.info(f"Custom field {field_gid} updated on task {task_gid}")
-            return True
-        except Exception as e:
-            logger.error(f"Error updating custom field: {e}")
-            raise
-    
     # Search Operations
-    def search_tasks(self, query: str, project_gids: Optional[List[str]] = None,
-                    assignee_gids: Optional[List[str]] = None,
-                    completed: Optional[bool] = None,
-                    modified_since: Optional[str] = None) -> List[Dict]:
-        """Search for tasks with various filters"""
+    def search_tasks_in_project(self, project_gid: str, query: str) -> List[Dict]:
+        """Search for tasks within a specific project"""
         if not self.is_connected():
             raise Exception("Asana client not connected")
         
         try:
-            search_params = {
-                'workspace': self.workspace_gid,
-                'text': query
-            }
+            # Get all tasks for the project and filter
+            all_tasks = self.get_project_tasks(project_gid)
             
-            if project_gids:
-                search_params['projects.any'] = ','.join(project_gids)
+            # Filter tasks by search query
+            matching_tasks = []
+            query_lower = query.lower()
             
-            if assignee_gids:
-                search_params['assignee.any'] = ','.join(assignee_gids)
+            for task in all_tasks:
+                task_name = task.get('name', '').lower()
+                task_notes = task.get('notes', '').lower()
+                
+                if query_lower in task_name or query_lower in task_notes:
+                    matching_tasks.append(task)
             
-            if completed is not None:
-                search_params['completed'] = completed
-            
-            if modified_since:
-                search_params['modified_since'] = modified_since
-            
-            tasks = list(self.client.workspaces.search_tasks_for_workspace(
-                self.workspace_gid,
-                search_params
-            ))
-            
-            logger.info(f"Search returned {len(tasks)} tasks")
-            return tasks
+            logger.info(f"Found {len(matching_tasks)} tasks matching '{query}' in project {project_gid}")
+            return matching_tasks
             
         except Exception as e:
             logger.error(f"Error searching tasks: {e}")
             raise
     
-    # Batch Operations
-    def batch_create_tasks(self, tasks_data: List[Dict[str, Any]]) -> List[Dict]:
-        """Create multiple tasks in batch"""
-        if not self.is_connected():
-            raise Exception("Asana client not connected")
-        
-        created_tasks = []
-        errors = []
-        
-        for task_data in tasks_data:
-            try:
-                if 'workspace' not in task_data:
-                    task_data['workspace'] = self.workspace_gid
-                
-                task = self.create_task(task_data)
-                created_tasks.append(task)
-                
-                # Small delay to avoid rate limits
-                time.sleep(0.1)
-                
-            except Exception as e:
-                errors.append({
-                    'task_name': task_data.get('name', 'Unknown'),
-                    'error': str(e)
-                })
-                logger.error(f"Error creating task in batch: {e}")
-        
-        result = {
-            'created': created_tasks,
-            'errors': errors,
-            'success_count': len(created_tasks),
-            'error_count': len(errors)
-        }
-        
-        logger.info(f"Batch creation: {len(created_tasks)} succeeded, {len(errors)} failed")
-        return result
-    
-    def batch_update_tasks(self, updates: List[Dict[str, Any]]) -> Dict:
-        """Update multiple tasks in batch
-        
-        Args:
-            updates: List of dicts with 'task_gid' and update data
-        """
-        if not self.is_connected():
-            raise Exception("Asana client not connected")
-        
-        updated_tasks = []
-        errors = []
-        
-        for update in updates:
-            try:
-                task_gid = update.pop('task_gid')
-                updated_task = self.update_task(task_gid, update)
-                updated_tasks.append(updated_task)
-                
-                # Small delay to avoid rate limits
-                time.sleep(0.1)
-                
-            except Exception as e:
-                errors.append({
-                    'task_gid': update.get('task_gid', 'Unknown'),
-                    'error': str(e)
-                })
-                logger.error(f"Error updating task in batch: {e}")
-        
-        result = {
-            'updated': updated_tasks,
-            'errors': errors,
-            'success_count': len(updated_tasks),
-            'error_count': len(errors)
-        }
-        
-        logger.info(f"Batch update: {len(updated_tasks)} succeeded, {len(errors)} failed")
-        return result
-    
     # Report Generation
-    def get_task_metrics(self, project_gid: Optional[str] = None,
-                        start_date: Optional[str] = None,
-                        end_date: Optional[str] = None) -> Dict:
-        """Get task metrics for reporting"""
+    def get_task_metrics_for_project(self, project_gid: str,
+                                    start_date: Optional[str] = None,
+                                    end_date: Optional[str] = None) -> Dict:
+        """Get task metrics for a specific project"""
         if not self.is_connected():
             raise Exception("Asana client not connected")
         
         try:
-            # Get tasks based on filters
-            if project_gid:
-                tasks = self.get_project_tasks(project_gid, completed_since=start_date)
-            else:
-                # Get all tasks in workspace (limited)
-                tasks = list(self.client.tasks.get_tasks({
-                    'workspace': self.workspace_gid,
-                    'modified_since': start_date if start_date else None,
-                    'limit': 100
-                }))
+            # Get tasks for the project
+            tasks = self.get_project_tasks(project_gid, completed_since=start_date)
             
             # Calculate metrics
             total_tasks = len(tasks)
@@ -534,11 +295,15 @@ class AsanaClient:
             today = datetime.now().date()
             for task in tasks:
                 if not task.get('completed') and task.get('due_on'):
-                    due_date = datetime.strptime(task['due_on'], '%Y-%m-%d').date()
-                    if due_date < today:
-                        overdue_tasks += 1
+                    try:
+                        due_date = datetime.strptime(task['due_on'], '%Y-%m-%d').date()
+                        if due_date < today:
+                            overdue_tasks += 1
+                    except:
+                        pass
             
             metrics = {
+                'project_gid': project_gid,
                 'total_tasks': total_tasks,
                 'completed_tasks': completed_tasks,
                 'incomplete_tasks': total_tasks - completed_tasks,
@@ -552,45 +317,16 @@ class AsanaClient:
             logger.error(f"Error generating task metrics: {e}")
             raise
     
-    def get_user_workload(self, user_gid: Optional[str] = None) -> Dict:
-        """Get workload information for a user or all users"""
-        if not self.is_connected():
-            raise Exception("Asana client not connected")
+    # Utility methods
+    def _object_to_dict(self, obj) -> Dict:
+        """Convert an API object to a dictionary"""
+        if isinstance(obj, dict):
+            return obj
         
-        try:
-            workload = {}
-            
-            if user_gid:
-                # Get tasks for specific user
-                tasks = list(self.client.tasks.get_tasks({
-                    'workspace': self.workspace_gid,
-                    'assignee': user_gid,
-                    'completed': False
-                }))
-                
-                user = self.get_user(user_gid)
-                workload[user['name']] = {
-                    'task_count': len(tasks),
-                    'tasks': tasks
-                }
-            else:
-                # Get workload for all users
-                users = self.get_users()
-                for user in users:
-                    tasks = list(self.client.tasks.get_tasks({
-                        'workspace': self.workspace_gid,
-                        'assignee': user['gid'],
-                        'completed': False,
-                        'limit': 50
-                    }))
-                    
-                    workload[user['name']] = {
-                        'task_count': len(tasks),
-                        'user_gid': user['gid']
-                    }
-            
-            return workload
-            
-        except Exception as e:
-            logger.error(f"Error getting user workload: {e}")
-            raise
+        result = {}
+        for attr in dir(obj):
+            if not attr.startswith('_'):
+                value = getattr(obj, attr)
+                if not callable(value):
+                    result[attr] = value
+        return result

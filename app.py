@@ -13,9 +13,9 @@ from config import create_app, setup_logging, setup_rate_limiter, ensure_directo
 from asana_client import AsanaClient
 from file_processors import process_uploaded_file, validate_file, load_server_files
 from page_handlers import (
-    handle_task_creation_page,
+    handle_project_finder_page,
     handle_project_dashboard_page,
-    handle_bulk_update_page,
+    handle_task_view_page,
     handle_search_page,
     handle_report_page
 )
@@ -154,19 +154,17 @@ def generic_api(page_name):
         # Route to appropriate handler based on page type
         page_type = form_data.get('page_type', 'asana-call')
         
-        if page_type == 'task-creation':
-            return handle_task_creation_page(
-                page_name, form_data, uploaded_files_data, 
-                server_files_data, session_id, asana_client
+        if page_type == 'project-finder':
+            return handle_project_finder_page(
+                page_name, form_data, session_id, asana_client
             )
         elif page_type == 'project-dashboard':
             return handle_project_dashboard_page(
                 page_name, form_data, session_id, asana_client
             )
-        elif page_type == 'bulk-update':
-            return handle_bulk_update_page(
-                page_name, form_data, uploaded_files_data,
-                session_id, asana_client
+        elif page_type == 'task-view':
+            return handle_task_view_page(
+                page_name, form_data, session_id, asana_client
             )
         elif page_type == 'search':
             return handle_search_page(
@@ -177,40 +175,37 @@ def generic_api(page_name):
                 page_name, form_data, session_id, asana_client
             )
         else:
-            # Default Asana operation handler
-            return handle_generic_asana_operation(
-                page_name, form_data, uploaded_files_data,
-                server_files_data, session_id, asana_client
-            )
+            return jsonify({'error': f'Unknown page type: {page_type}'}), 400
     
     except Exception as e:
         logger.error(f"Error in API for {page_name}: {e}")
         return jsonify({'error': 'Internal server error'}), 500
 
-@app.route('/api/asana/projects', methods=['GET'])
-def get_projects():
-    """Get list of projects in workspace"""
+@app.route('/api/asana/project/<project_gid>', methods=['GET'])
+def get_project(project_gid):
+    """Get specific project details"""
     try:
         if not asana_client.is_connected():
             return jsonify({'error': 'Asana not connected'}), 503
         
-        projects = asana_client.get_projects()
-        return jsonify({'projects': projects})
+        project = asana_client.get_project(project_gid)
+        formatted_project = format_project_response(project)
+        return jsonify(formatted_project)
     except Exception as e:
-        logger.error(f"Error fetching projects: {e}")
+        logger.error(f"Error fetching project {project_gid}: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/asana/users', methods=['GET'])
-def get_users():
-    """Get list of users in workspace"""
+@app.route('/api/asana/project/<project_gid>/tasks', methods=['GET'])
+def get_project_tasks(project_gid):
+    """Get tasks for a specific project"""
     try:
         if not asana_client.is_connected():
             return jsonify({'error': 'Asana not connected'}), 503
         
-        users = asana_client.get_users()
-        return jsonify({'users': users})
+        tasks = asana_client.get_project_tasks(project_gid)
+        return jsonify({'tasks': tasks})
     except Exception as e:
-        logger.error(f"Error fetching users: {e}")
+        logger.error(f"Error fetching tasks for project {project_gid}: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/asana/task/<task_gid>', methods=['GET'])
@@ -227,49 +222,35 @@ def get_task(task_gid):
         logger.error(f"Error fetching task {task_gid}: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/asana/project/<project_gid>/tasks', methods=['GET'])
-def get_project_tasks(project_gid):
-    """Get tasks for a specific project"""
-    try:
-        if not asana_client.is_connected():
-            return jsonify({'error': 'Asana not connected'}), 503
-        
-        tasks = asana_client.get_project_tasks(project_gid)
-        return jsonify({'tasks': tasks})
-    except Exception as e:
-        logger.error(f"Error fetching tasks for project {project_gid}: {e}")
-        return jsonify({'error': str(e)}), 500
-
 # Helper functions
 def get_page_configuration(page_name):
     """Get configuration for a specific page"""
     # This could be loaded from a JSON file or database
     configurations = {
-        'task-create': {
-            'page_type': 'task-creation',
-            'load_server_files': True,
-            'preload_asana_data': ['projects', 'users'],
-            'directories': [page_name, 'templates']
+        'project-finder': {
+            'page_type': 'project-finder',
+            'load_server_files': False,
+            'preload_asana_data': []
         },
         'project-dashboard': {
             'page_type': 'project-dashboard',
             'load_server_files': False,
-            'preload_asana_data': ['projects']
+            'preload_asana_data': []
         },
-        'bulk-update': {
-            'page_type': 'bulk-update',
-            'load_server_files': True,
-            'preload_asana_data': ['projects', 'custom_fields']
+        'task-view': {
+            'page_type': 'task-view',
+            'load_server_files': False,
+            'preload_asana_data': []
         },
         'task-search': {
             'page_type': 'search',
             'load_server_files': False,
-            'preload_asana_data': ['projects', 'users', 'tags']
+            'preload_asana_data': []
         },
-        'weekly-report': {
+        'project-report': {
             'page_type': 'report',
             'load_server_files': False,
-            'preload_asana_data': ['projects', 'users']
+            'preload_asana_data': []
         }
     }
     
@@ -287,78 +268,17 @@ def preload_asana_data(page_config):
         return data
     
     try:
-        preload_types = page_config.get('preload_asana_data', [])
+        # Only load specific data as needed
+        # No longer loading all projects or all users
         
-        if 'projects' in preload_types:
-            data['projects'] = asana_client.get_projects()
-        
-        if 'users' in preload_types:
-            data['users'] = asana_client.get_users()
-        
-        if 'tags' in preload_types:
-            data['tags'] = asana_client.get_tags()
-        
-        if 'custom_fields' in preload_types:
-            data['custom_fields'] = asana_client.get_custom_fields()
+        # Get current user info
+        if 'current_user' in page_config.get('preload_asana_data', []):
+            data['current_user'] = asana_client.get_me()
         
     except Exception as e:
         logger.error(f"Error preloading Asana data: {e}")
     
     return data
-
-def handle_generic_asana_operation(page_name, form_data, uploaded_files_data, 
-                                  server_files_data, session_id, asana_client):
-    """Handle generic Asana API operations"""
-    try:
-        operation = form_data.get('operation', 'unknown')
-        
-        result = {
-            'success': True,
-            'operation': operation,
-            'session_id': session_id,
-            'timestamp': datetime.utcnow().isoformat()
-        }
-        
-        # Route based on operation type
-        if operation == 'create_task':
-            task_data = {
-                'name': form_data.get('task_name'),
-                'notes': form_data.get('task_notes', ''),
-                'projects': [form_data.get('project_gid')],
-                'assignee': form_data.get('assignee_gid')
-            }
-            
-            if form_data.get('due_date'):
-                task_data['due_on'] = form_data.get('due_date')
-            
-            created_task = asana_client.create_task(task_data)
-            result['task'] = format_task_response(created_task)
-            result['message'] = f"Task created: {created_task['name']}"
-            
-        elif operation == 'update_task':
-            task_gid = form_data.get('task_gid')
-            update_data = {}
-            
-            if form_data.get('task_name'):
-                update_data['name'] = form_data.get('task_name')
-            if form_data.get('task_notes'):
-                update_data['notes'] = form_data.get('task_notes')
-            if form_data.get('completed'):
-                update_data['completed'] = form_data.get('completed') == 'true'
-            
-            updated_task = asana_client.update_task(task_gid, update_data)
-            result['task'] = format_task_response(updated_task)
-            result['message'] = "Task updated successfully"
-            
-        else:
-            result['success'] = False
-            result['message'] = f"Unknown operation: {operation}"
-        
-        return jsonify(result)
-        
-    except Exception as e:
-        logger.error(f"Error in generic Asana operation: {e}")
-        return jsonify({'error': str(e)}), 500
 
 # Error handlers
 @app.errorhandler(413)

@@ -21,6 +21,7 @@ from page_handlers import (
 )
 from utils import get_session_id, get_server_files_info, sanitize_form_key
 from task_formatters import format_task_response, format_project_response
+from comment_tagger import handle_comment_tagger_page
 
 # Initialize application components
 app = create_app()

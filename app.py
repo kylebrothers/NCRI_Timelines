@@ -175,6 +175,10 @@ def generic_api(page_name):
             return handle_report_page(
                 page_name, form_data, session_id, asana_client
             )
+        elif page_type == 'comment-tagger':
+            return handle_comment_tagger_page(
+                page_name, form_data, session_id, asana_client
+            )
         else:
             return jsonify({'error': f'Unknown page type: {page_type}'}), 400
     
@@ -251,6 +255,11 @@ def get_page_configuration(page_name):
         'project-report': {
             'page_type': 'report',
             'load_server_files': False,
+            'preload_asana_data': []
+        },
+        'comment-tagger': {
+            'page_type': 'comment-tagger',
+            'load_server_files': True,  # Since we're using server_files for storage
             'preload_asana_data': []
         }
     }

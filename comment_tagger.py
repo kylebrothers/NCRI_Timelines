@@ -25,6 +25,7 @@ class CommentTagger:
         self.training_data = self.load_json("training_data.json", [])
         self.patterns = self.load_json("patterns.json", {})
         self.model_cache = self.load_json("model_cache.json", {})
+        self.tagged_comments = self.load_json("tagged_comments.json", {})  # Track which comments are tagged
         
     def ensure_directories(self):
         """Create necessary directories if they don't exist"""
@@ -195,7 +196,13 @@ class CommentTagger:
         self.save_json("patterns.json", self.patterns)
         self.save_json("training_data.json", self.training_data)
     
-    def suggest_new_tag(self, comment: str) -> Optional[str]:
+    def is_comment_tagged(self, story_gid: str) -> bool:
+        """Check if a comment has already been tagged"""
+        return story_gid in self.tagged_comments
+    
+    def get_comment_tags(self, story_gid: str) -> List[str]:
+        """Get tags for a specific comment"""
+        return self.tagged_comments.get(story_gid, {}).get('tags', [])
         """Suggest a new tag name based on comment content"""
         keywords = self.extract_keywords(comment)
         
@@ -246,6 +253,12 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
                 
                 for story in stories:
                     if story.get('type') == 'comment' and story.get('text'):
+                        story_gid = story.get('gid')
+                        
+                        # Skip if already tagged
+                        if tagger.is_comment_tagged(story_gid):
+                            continue
+                        
                         comment_text = story.get('text', '')
                         date_extracted = tagger.extract_date_from_comment(comment_text)
                         
@@ -255,13 +268,20 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
                         comments_to_tag.append({
                             'task_gid': task_gid,
                             'task_name': task.get('name', 'Unknown Task'),
-                            'story_gid': story.get('gid'),
+                            'story_gid': story_gid,
                             'comment_text': comment_text,
                             'date_extracted': date_extracted,
                             'created_at': story.get('created_at'),
                             'created_by': story.get('created_by', {}).get('name', 'Unknown'),
                             'suggested_tags': suggestions
                         })
+            
+            # Count already tagged comments for stats
+            total_in_project = len(comments_to_tag) + len([
+                gid for gid in tagger.tagged_comments 
+                if any(gid in str(story.get('gid', '')) for task in tasks 
+                      for story in asana_client.get_task_stories(task.get('gid')))
+            ])
             
             return jsonify({
                 'success': True,
@@ -270,26 +290,40 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
                     'name': project.get('name')
                 },
                 'comments': comments_to_tag,
-                'total_comments': len(comments_to_tag),
+                'total_untagged': len(comments_to_tag),
+                'total_already_tagged': total_in_project - len(comments_to_tag),
                 'available_tags': tagger.tag_definitions,
                 'session_id': session_id
             })
         
-        elif operation == 'save_tagged_comments':
-            # Save user's tagging decisions and learn from them
-            tagged_comments = json.loads(form_data.get('tagged_comments', '[]'))
+        elif operation == 'save_tagged_comment':
+            # Save a single tagged comment and learn from it
+            comment_data = json.loads(form_data.get('comment_data', '{}'))
             
-            for item in tagged_comments:
-                comment_text = item.get('comment_text')
-                assigned_tags = item.get('assigned_tags', [])
+            story_gid = comment_data.get('story_gid')
+            comment_text = comment_data.get('comment_text')
+            assigned_tags = comment_data.get('assigned_tags', [])
+            
+            if not story_gid or not comment_text:
+                return jsonify({'error': 'Missing required data'}), 400
+            
+            if assigned_tags:  # Only save if tags were assigned
+                # Learn from the tagging
+                tagger.learn_from_tagging(comment_text, assigned_tags)
                 
-                if comment_text and assigned_tags:
-                    tagger.learn_from_tagging(comment_text, assigned_tags)
+                # Mark comment as tagged
+                tagger.tagged_comments[story_gid] = {
+                    'tags': assigned_tags,
+                    'tagged_at': datetime.now().isoformat(),
+                    'comment_text': comment_text[:100]  # Store preview for reference
+                }
+                
+                # Save the tagged comments registry
+                tagger.save_json("tagged_comments.json", tagger.tagged_comments)
             
             return jsonify({
                 'success': True,
-                'message': f'Saved {len(tagged_comments)} tagged comments',
-                'patterns_updated': True,
+                'message': 'Comment tagged successfully',
                 'session_id': session_id
             })
         

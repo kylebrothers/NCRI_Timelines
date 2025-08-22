@@ -1,11 +1,13 @@
 """
-Comment tagging page handler for training NLP classification of Asana comments
+Comment tagging page handler with SpaCy NLP for intelligent segmentation
 """
 
 import os
 import json
 import re
 import logging
+import spacy
+import dateparser
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
 from flask import jsonify
@@ -13,19 +15,219 @@ from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
+# Initialize SpaCy model (will be loaded once)
+try:
+    nlp = spacy.load("en_core_web_sm")
+except:
+    logger.warning("SpaCy model not found. Run: python -m spacy download en_core_web_sm")
+    nlp = None
+
+class CommentSegmenter:
+    """Intelligent comment segmentation using SpaCy and dateparser"""
+    
+    def __init__(self):
+        self.nlp = nlp
+        
+    def extract_dates_and_segments(self, text: str, asana_date: str = None) -> List[Dict]:
+        """
+        Extract dates and create intelligent segments using NLP
+        """
+        if not self.nlp:
+            # Fallback to simple segmentation if SpaCy not available
+            return self.simple_fallback_segmentation(text, asana_date)
+        
+        # Parse text with SpaCy
+        doc = self.nlp(text)
+        
+        # Extract all potential dates using dateparser
+        date_results = dateparser.search.search_dates(text, 
+                                                       languages=['en'],
+                                                       settings={'PREFER_DATES_FROM': 'past'})
+        
+        if not date_results:
+            # No dates found - return entire text as one segment
+            return [{
+                'text': text,
+                'date': asana_date or datetime.now().strftime('%Y-%m-%d'),
+                'dateSource': 'asana_timestamp' if asana_date else 'default',
+                'startIndex': 0,
+                'endIndex': len(text)
+            }]
+        
+        # Analyze sentence structure to determine segmentation
+        segments = self.create_intelligent_segments(doc, date_results, text, asana_date)
+        
+        return segments
+    
+    def create_intelligent_segments(self, doc, date_results, original_text, asana_date):
+        """
+        Create segments based on sentence structure and date positions
+        """
+        segments = []
+        sentences = list(doc.sents)
+        
+        # Map dates to their sentence indices
+        date_sentence_map = []
+        for date_str, date_obj in date_results:
+            date_pos = original_text.find(date_str)
+            if date_pos == -1:
+                continue
+                
+            # Find which sentence contains this date
+            for sent_idx, sent in enumerate(sentences):
+                if sent.start_char <= date_pos < sent.end_char:
+                    date_sentence_map.append({
+                        'date_str': date_str,
+                        'date_obj': date_obj,
+                        'position': date_pos,
+                        'sentence_idx': sent_idx,
+                        'sentence': sent
+                    })
+                    break
+        
+        # Determine segmentation strategy
+        if len(date_sentence_map) == 1:
+            # Single date - check if it's a divider or embedded
+            date_info = date_sentence_map[0]
+            date_pos_in_sent = date_info['position'] - date_info['sentence'].start_char
+            sent_text = date_info['sentence'].text
+            
+            # Check if date is at the beginning of a sentence (likely a divider)
+            if date_pos_in_sent < 15 and date_info['sentence_idx'] > 0:
+                # Date starts a new section
+                # Segment 1: Everything before this sentence
+                seg1_text = original_text[:date_info['sentence'].start_char].strip()
+                if seg1_text:
+                    segments.append({
+                        'text': seg1_text,
+                        'date': asana_date or datetime.now().strftime('%Y-%m-%d'),
+                        'dateSource': 'asana_timestamp',
+                        'startIndex': 0,
+                        'endIndex': date_info['sentence'].start_char
+                    })
+                
+                # Segment 2: From this sentence onward
+                seg2_text = original_text[date_info['sentence'].start_char:].strip()
+                segments.append({
+                    'text': seg2_text,
+                    'date': date_info['date_obj'].strftime('%Y-%m-%d'),
+                    'dateSource': 'extracted',
+                    'startIndex': date_info['sentence'].start_char,
+                    'endIndex': len(original_text)
+                })
+            else:
+                # Date is embedded - treat entire text as one segment
+                segments.append({
+                    'text': original_text,
+                    'date': date_info['date_obj'].strftime('%Y-%m-%d'),
+                    'dateSource': 'extracted',
+                    'startIndex': 0,
+                    'endIndex': len(original_text)
+                })
+        
+        elif len(date_sentence_map) > 1:
+            # Multiple dates - check for pattern
+            segments = self.segment_by_date_patterns(date_sentence_map, sentences, original_text, asana_date)
+        
+        else:
+            # No valid dates found after parsing
+            segments.append({
+                'text': original_text,
+                'date': asana_date or datetime.now().strftime('%Y-%m-%d'),
+                'dateSource': 'asana_timestamp',
+                'startIndex': 0,
+                'endIndex': len(original_text)
+            })
+        
+        return segments
+    
+    def segment_by_date_patterns(self, date_map, sentences, text, asana_date):
+        """
+        Handle multiple dates - look for patterns like date-prefixed entries
+        """
+        segments = []
+        
+        # Check if dates appear to be section headers (at sentence starts)
+        section_dates = []
+        for date_info in date_map:
+            date_pos_in_sent = date_info['position'] - date_info['sentence'].start_char
+            # Is this date at or near the start of its sentence?
+            if date_pos_in_sent < 15:
+                section_dates.append(date_info)
+        
+        if not section_dates:
+            # All dates are embedded - treat as single segment with first date
+            segments.append({
+                'text': text,
+                'date': date_map[0]['date_obj'].strftime('%Y-%m-%d'),
+                'dateSource': 'extracted',
+                'startIndex': 0,
+                'endIndex': len(text)
+            })
+        else:
+            # Create segments based on section dates
+            for i, date_info in enumerate(section_dates):
+                start_pos = date_info['sentence'].start_char
+                
+                # Find end position (start of next section or end of text)
+                if i + 1 < len(section_dates):
+                    end_pos = section_dates[i + 1]['sentence'].start_char
+                else:
+                    end_pos = len(text)
+                
+                segment_text = text[start_pos:end_pos].strip()
+                if segment_text:
+                    segments.append({
+                        'text': segment_text,
+                        'date': date_info['date_obj'].strftime('%Y-%m-%d'),
+                        'dateSource': 'extracted',
+                        'startIndex': start_pos,
+                        'endIndex': end_pos
+                    })
+            
+            # Check for text before first section
+            if section_dates and section_dates[0]['sentence'].start_char > 20:
+                prefix_text = text[:section_dates[0]['sentence'].start_char].strip()
+                if prefix_text:
+                    segments.insert(0, {
+                        'text': prefix_text,
+                        'date': asana_date or datetime.now().strftime('%Y-%m-%d'),
+                        'dateSource': 'asana_timestamp',
+                        'startIndex': 0,
+                        'endIndex': section_dates[0]['sentence'].start_char
+                    })
+        
+        return segments
+    
+    def simple_fallback_segmentation(self, text: str, asana_date: str) -> List[Dict]:
+        """
+        Simple fallback if SpaCy is not available
+        """
+        # Just return the whole text as one segment
+        return [{
+            'text': text,
+            'date': asana_date or datetime.now().strftime('%Y-%m-%d'),
+            'dateSource': 'asana_timestamp' if asana_date else 'default',
+            'startIndex': 0,
+            'endIndex': len(text)
+        }]
+
+
 class CommentTagger:
     """Handles comment tagging operations and pattern learning"""
     
-    def __init__(self, base_path="/app/server_files/comment_tags"):
+    def __init__(self, base_path="/app/server_files/comment_tagger"):
         self.base_path = base_path
         self.ensure_directories()
+        self.segmenter = CommentSegmenter()
         
         # Load or initialize data structures
         self.tag_definitions = self.load_json("tag_definitions.json", {})
         self.training_data = self.load_json("training_data.json", [])
         self.patterns = self.load_json("patterns.json", {})
         self.model_cache = self.load_json("model_cache.json", {})
-        self.tagged_comments = self.load_json("tagged_comments.json", {})  # Track which comments are tagged
+        self.tagged_comments = self.load_json("tagged_comments.json", {})
+        self.segmentation_training = self.load_json("segmentation_training.json", [])
         
     def ensure_directories(self):
         """Create necessary directories if they don't exist"""
@@ -52,62 +254,45 @@ class CommentTagger:
         except Exception as e:
             logger.error(f"Error saving {filename}: {e}")
     
-    def extract_date_from_comment(self, comment: str) -> Optional[str]:
-        """Extract date from comment text using regex patterns"""
-        # Patterns for various date formats
-        patterns = [
-            r'(\d{1,2}/\d{1,2}/\d{4})',  # MM/DD/YYYY or M/D/YYYY
-            r'(\d{1,2}/\d{1,2}/\d{2})',    # MM/DD/YY or M/D/YY
-            r'(\d{1,2}/\d{1,2})',          # MM/DD or M/D (no year)
-            r'(\d{1,2}-\d{1,2}-\d{4})',    # MM-DD-YYYY
-            r'(\d{4}-\d{1,2}-\d{1,2})',    # YYYY-MM-DD
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, comment)
-            if match:
-                date_str = match.group(1)
-                # Normalize date format
-                try:
-                    # Handle different formats and missing years
-                    if '/' in date_str and len(date_str.split('/')[-1]) == 2:
-                        # Add 20 prefix for 2-digit years
-                        parts = date_str.split('/')
-                        parts[-1] = '20' + parts[-1]
-                        date_str = '/'.join(parts)
-                    elif '/' in date_str and len(date_str.split('/')) == 2:
-                        # No year provided, use current year
-                        date_str += f"/{datetime.now().year}"
-                    
-                    return date_str
-                except:
-                    pass
-        
-        return None
+    def segment_comment(self, comment_text: str, asana_date: str = None) -> List[Dict]:
+        """
+        Use NLP to intelligently segment the comment
+        """
+        return self.segmenter.extract_dates_and_segments(comment_text, asana_date)
+    
+    def save_segmentation_training(self, comment_text: str, user_segments: List[Dict]):
+        """
+        Save user-corrected segmentation for training
+        """
+        training_example = {
+            'comment_text': comment_text,
+            'user_segments': user_segments,
+            'timestamp': datetime.now().isoformat()
+        }
+        self.segmentation_training.append(training_example)
+        self.save_json("segmentation_training.json", self.segmentation_training)
     
     def extract_keywords(self, text: str) -> List[str]:
-        """Extract meaningful keywords from text"""
-        # Remove date patterns first
-        text_no_date = re.sub(r'\d{1,2}[/-]\d{1,2}[/-]?\d{0,4}', '', text)
-        
-        # Convert to lowercase and extract words
-        words = re.findall(r'\b[a-z]+\b', text_no_date.lower())
-        
-        # Filter common words (basic stopwords)
-        stopwords = {'i', 'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 
-                    'to', 'for', 'of', 'with', 'by', 'from', 'was', 'were', 'been',
-                    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
-                    'could', 'should', 'may', 'might', 'must', 'can', 'this', 'that'}
-        
-        keywords = [w for w in words if w not in stopwords and len(w) > 2]
-        
-        # Also extract 2-word phrases
-        if len(words) > 1:
-            for i in range(len(words) - 1):
-                if words[i] not in stopwords and words[i+1] not in stopwords:
-                    keywords.append(f"{words[i]} {words[i+1]}")
-        
-        return keywords
+        """Extract meaningful keywords from text using SpaCy if available"""
+        if nlp:
+            doc = nlp(text)
+            # Extract nouns, verbs, and named entities
+            keywords = []
+            for token in doc:
+                if token.pos_ in ['NOUN', 'VERB', 'PROPN'] and not token.is_stop:
+                    keywords.append(token.lemma_.lower())
+            
+            # Add named entities
+            for ent in doc.ents:
+                keywords.append(ent.text.lower())
+            
+            return list(set(keywords))
+        else:
+            # Fallback to simple extraction
+            words = re.findall(r'\b[a-z]+\b', text.lower())
+            stopwords = {'i', 'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 
+                        'to', 'for', 'of', 'with', 'by', 'from', 'was', 'were', 'been'}
+            return [w for w in words if w not in stopwords and len(w) > 2]
     
     def calculate_tag_confidence(self, comment: str, tag: str) -> float:
         """Calculate confidence score for a tag based on patterns"""
@@ -153,15 +338,6 @@ class CommentTagger:
         # Sort by confidence
         suggestions.sort(key=lambda x: x['confidence'], reverse=True)
         
-        # If no good suggestions, propose "unknown" or "review needed"
-        if not suggestions or suggestions[0]['confidence'] < 0.3:
-            suggestions.insert(0, {
-                'tag_id': '_suggest_new_',
-                'tag_name': 'Suggest New Tag',
-                'confidence': 0.0,
-                'auto_selected': False
-            })
-        
         return suggestions
     
     def learn_from_tagging(self, comment: str, assigned_tags: List[str]):
@@ -186,7 +362,6 @@ class CommentTagger:
         # Save training data
         self.training_data.append({
             'comment': comment,
-            'date_extracted': self.extract_date_from_comment(comment),
             'tags': assigned_tags,
             'timestamp': datetime.now().isoformat(),
             'keywords': keywords
@@ -203,25 +378,6 @@ class CommentTagger:
     def get_comment_tags(self, story_gid: str) -> List[str]:
         """Get tags for a specific comment"""
         return self.tagged_comments.get(story_gid, {}).get('tags', [])
-        """Suggest a new tag name based on comment content"""
-        keywords = self.extract_keywords(comment)
-        
-        # Look for action words that might indicate activity type
-        action_indicators = ['submitted', 'reviewed', 'met', 'completed', 'analyzed', 
-                            'collected', 'prepared', 'discussed', 'sent', 'received',
-                            'approved', 'revised', 'created', 'updated']
-        
-        for keyword in keywords:
-            for action in action_indicators:
-                if action in keyword:
-                    # Generate tag suggestion based on action
-                    return f"{action.capitalize()} Activity"
-        
-        # If no clear action, use most prominent non-common words
-        if keywords:
-            return f"{keywords[0].title()} Related"
-        
-        return None
 
 
 def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
@@ -260,17 +416,20 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
                             continue
                         
                         comment_text = story.get('text', '')
-                        date_extracted = tagger.extract_date_from_comment(comment_text)
+                        asana_date = story.get('created_at', '').split('T')[0] if story.get('created_at') else None
                         
-                        # Get tag suggestions
-                        suggestions = tagger.suggest_tags(comment_text)
+                        # Use intelligent segmentation
+                        segments = tagger.segment_comment(comment_text, asana_date)
+                        
+                        # Get tag suggestions for the first segment
+                        suggestions = tagger.suggest_tags(segments[0]['text'] if segments else comment_text)
                         
                         comments_to_tag.append({
                             'task_gid': task_gid,
                             'task_name': task.get('name', 'Unknown Task'),
                             'story_gid': story_gid,
                             'comment_text': comment_text,
-                            'date_extracted': date_extracted,
+                            'segments': segments,
                             'created_at': story.get('created_at'),
                             'created_by': story.get('created_by', {}).get('name', 'Unknown'),
                             'suggested_tags': suggestions
@@ -302,10 +461,15 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
             
             story_gid = comment_data.get('story_gid')
             comment_text = comment_data.get('comment_text')
+            segments = comment_data.get('segments', [])
             assigned_tags = comment_data.get('assigned_tags', [])
             
             if not story_gid or not comment_text:
                 return jsonify({'error': 'Missing required data'}), 400
+            
+            # Save segmentation training data if user modified segments
+            if segments:
+                tagger.save_segmentation_training(comment_text, segments)
             
             if assigned_tags:  # Only save if tags were assigned
                 # Learn from the tagging
@@ -314,6 +478,7 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
                 # Mark comment as tagged
                 tagger.tagged_comments[story_gid] = {
                     'tags': assigned_tags,
+                    'segments': segments,
                     'tagged_at': datetime.now().isoformat(),
                     'comment_text': comment_text[:100]  # Store preview for reference
                 }
@@ -356,6 +521,7 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
             stats = {
                 'total_tags': len(tagger.tag_definitions),
                 'total_training_samples': len(tagger.training_data),
+                'total_segmentation_samples': len(tagger.segmentation_training),
                 'tag_usage': defaultdict(int),
                 'patterns_learned': {}
             }

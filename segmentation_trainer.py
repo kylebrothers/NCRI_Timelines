@@ -1,0 +1,263 @@
+"""
+Segmentation training page handler for collecting training data
+"""
+
+import os
+import json
+import logging
+from datetime import datetime
+from typing import Dict, List, Any
+from flask import jsonify
+from comment_tagger import CommentSegmenter
+
+logger = logging.getLogger(__name__)
+
+class SegmentationTrainer:
+    """Handles segmentation training data collection"""
+    
+    def __init__(self, base_path="/app/server_files/segmentation_trainer"):
+        self.base_path = base_path
+        self.ensure_directories()
+        self.segmenter = CommentSegmenter()
+        
+        # Load training data
+        self.training_data = self.load_json("segmentation_training.json", [])
+        self.processed_comments = self.load_json("processed_comments.json", {})
+        
+    def ensure_directories(self):
+        """Create necessary directories if they don't exist"""
+        os.makedirs(self.base_path, exist_ok=True)
+        
+    def load_json(self, filename: str, default: Any) -> Any:
+        """Load JSON file or return default if not exists"""
+        filepath = os.path.join(self.base_path, filename)
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Error loading {filename}: {e}")
+        return default
+    
+    def save_json(self, filename: str, data: Any):
+        """Save data to JSON file"""
+        filepath = os.path.join(self.base_path, filename)
+        try:
+            with open(filepath, 'w') as f:
+                json.dump(data, f, indent=2, default=str)
+            logger.info(f"Saved {filename}")
+        except Exception as e:
+            logger.error(f"Error saving {filename}: {e}")
+    
+    def is_comment_processed(self, story_gid: str) -> bool:
+        """Check if a comment has already been processed for training"""
+        return story_gid in self.processed_comments
+    
+    def save_training_example(self, story_gid: str, comment_text: str, 
+                             original_segments: List[Dict], 
+                             corrected_segments: List[Dict],
+                             was_corrected: bool,
+                             boundaries: List[int]):
+        """Save a training example"""
+        training_example = {
+            'story_gid': story_gid,
+            'comment_text': comment_text,
+            'original_segments': original_segments,
+            'corrected_segments': corrected_segments,
+            'was_corrected': was_corrected,
+            'boundaries': boundaries,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Add to training data
+        self.training_data.append(training_example)
+        
+        # Mark as processed
+        self.processed_comments[story_gid] = {
+            'processed_at': datetime.now().isoformat(),
+            'was_corrected': was_corrected,
+            'segment_count': len(corrected_segments)
+        }
+        
+        # Save both files
+        self.save_json("segmentation_training.json", self.training_data)
+        self.save_json("processed_comments.json", self.processed_comments)
+        
+        logger.info(f"Saved training example for {story_gid} (corrected: {was_corrected})")
+    
+    def get_training_stats(self) -> Dict:
+        """Get statistics about training data"""
+        total_samples = len(self.training_data)
+        confirmed_correct = sum(1 for sample in self.training_data if not sample['was_corrected'])
+        corrected = sum(1 for sample in self.training_data if sample['was_corrected'])
+        
+        accuracy = (confirmed_correct / total_samples * 100) if total_samples > 0 else 0
+        
+        # Analyze common boundary patterns
+        boundary_patterns = {}
+        for sample in self.training_data:
+            if sample.get('boundaries'):
+                pattern = f"{len(sample['boundaries'])} boundaries"
+                boundary_patterns[pattern] = boundary_patterns.get(pattern, 0) + 1
+        
+        return {
+            'total_samples': total_samples,
+            'confirmed': confirmed_correct,
+            'corrected': corrected,
+            'accuracy': round(accuracy, 1),
+            'boundary_patterns': boundary_patterns
+        }
+    
+    def export_for_training(self) -> List[Dict]:
+        """Export data in format suitable for training a model"""
+        export_data = []
+        
+        for sample in self.training_data:
+            # Create training format with text and boundary positions
+            export_data.append({
+                'text': sample['comment_text'],
+                'boundaries': sample['boundaries'],
+                'segments': sample['corrected_segments'],
+                'was_auto_correct': not sample['was_corrected']
+            })
+        
+        return export_data
+
+
+def handle_segmentation_trainer_page(page_name, form_data, session_id, asana_client):
+    """Handle segmentation training operations"""
+    try:
+        operation = form_data.get('operation')
+        trainer = SegmentationTrainer()
+        
+        if operation == 'load_for_segmentation':
+            # Load comments for segmentation training
+            project_gid = form_data.get('project_gid')
+            if not project_gid:
+                return jsonify({'error': 'Project GID required'}), 400
+            
+            # Get project info
+            project = asana_client.get_project(project_gid)
+            
+            # Get tasks with comments
+            tasks = asana_client.get_project_tasks(project_gid)
+            comments_for_training = []
+            
+            for task in tasks:
+                task_gid = task.get('gid')
+                if not task_gid:
+                    continue
+                
+                # Get task stories (comments)
+                stories = asana_client.get_task_stories(task_gid)
+                
+                for story in stories:
+                    if story.get('type') == 'comment' and story.get('text'):
+                        story_gid = story.get('gid')
+                        
+                        # Skip if already processed
+                        if trainer.is_comment_processed(story_gid):
+                            continue
+                        
+                        comment_text = story.get('text', '')
+                        asana_date = story.get('created_at', '').split('T')[0] if story.get('created_at') else None
+                        
+                        # Get automatic segmentation
+                        segments = trainer.segmenter.extract_dates_and_segments(comment_text, asana_date)
+                        
+                        comments_for_training.append({
+                            'task_gid': task_gid,
+                            'task_name': task.get('name', 'Unknown Task'),
+                            'story_gid': story_gid,
+                            'comment_text': comment_text,
+                            'segments': segments,
+                            'created_at': story.get('created_at'),
+                            'created_by': story.get('created_by', {}).get('name', 'Unknown')
+                        })
+            
+            return jsonify({
+                'success': True,
+                'project': {
+                    'gid': project.get('gid'),
+                    'name': project.get('name')
+                },
+                'comments': comments_for_training,
+                'total_unprocessed': len(comments_for_training),
+                'total_processed': len(trainer.processed_comments),
+                'session_id': session_id
+            })
+        
+        elif operation == 'save_segmentation':
+            # Save segmentation training data
+            comment_data = json.loads(form_data.get('comment_data', '{}'))
+            
+            story_gid = comment_data.get('story_gid')
+            comment_text = comment_data.get('comment_text')
+            original_segments = comment_data.get('original_segments', [])
+            corrected_segments = comment_data.get('corrected_segments', [])
+            was_corrected = comment_data.get('was_corrected', False)
+            boundaries = comment_data.get('boundaries', [])
+            
+            if not story_gid or not comment_text:
+                return jsonify({'error': 'Missing required data'}), 400
+            
+            # Save the training example
+            trainer.save_training_example(
+                story_gid=story_gid,
+                comment_text=comment_text,
+                original_segments=original_segments,
+                corrected_segments=corrected_segments,
+                was_corrected=was_corrected,
+                boundaries=boundaries
+            )
+            
+            return jsonify({
+                'success': True,
+                'message': 'Segmentation training data saved',
+                'was_corrected': was_corrected,
+                'session_id': session_id
+            })
+        
+        elif operation == 'get_stats':
+            # Get training statistics
+            stats = trainer.get_training_stats()
+            
+            return jsonify({
+                'success': True,
+                'stats': stats,
+                'session_id': session_id
+            })
+        
+        elif operation == 'export_training_data':
+            # Export training data for model training
+            export_data = trainer.export_for_training()
+            
+            # Save to a file that can be downloaded
+            export_path = os.path.join(trainer.base_path, 'training_export.json')
+            with open(export_path, 'w') as f:
+                json.dump(export_data, f, indent=2, default=str)
+            
+            return jsonify({
+                'success': True,
+                'message': f'Exported {len(export_data)} training samples',
+                'export_path': export_path,
+                'session_id': session_id
+            })
+        
+        elif operation == 'clear_processed':
+            # Clear processed comments to allow re-training
+            trainer.processed_comments = {}
+            trainer.save_json("processed_comments.json", trainer.processed_comments)
+            
+            return jsonify({
+                'success': True,
+                'message': 'Cleared processed comments tracking',
+                'session_id': session_id
+            })
+        
+        else:
+            return jsonify({'error': f'Unknown operation: {operation}'}), 400
+    
+    except Exception as e:
+        logger.error(f"Error in segmentation trainer handler: {e}")
+        return jsonify({'error': str(e)}), 500

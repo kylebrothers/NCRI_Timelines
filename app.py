@@ -77,13 +77,13 @@ def generic_page(page_name):
     session_id = get_session_id()
     logger.info(f"Page accessed: {page_name} - Session: {session_id}")
     
-    # Convert URL format to template format
-    template_name = page_name.replace('-', '_') + '.html'
+    # Simply add .html extension - preserve original naming
+    template_name = page_name + '.html'
     
-    # Get page-specific configuration
+    # Get page-specific configuration using original name
     page_config = get_page_configuration(page_name)
     
-    # Load server files if specified
+    # Load server files if specified using original name
     server_files_info = []
     if page_config.get('load_server_files'):
         directories = page_config.get('directories', [page_name])
@@ -137,10 +137,10 @@ def generic_api(page_name):
                 except Exception as e:
                     return jsonify({'error': f'Error processing {field_name}: {str(e)}'}), 400
         
-        # Get page configuration
+        # Get page configuration using original name
         page_config = get_page_configuration(page_name)
         
-        # Load server files if needed
+        # Load server files if needed using original name
         server_files_data = {}
         if page_config.get('load_server_files'):
             directories = page_config.get('directories', [page_name])
@@ -229,35 +229,35 @@ def get_task(task_gid):
 
 # Helper functions
 def get_page_configuration(page_name):
-    """Get configuration for a specific page"""
-    # This could be loaded from a JSON file or database
+    """Get configuration for a specific page - expects underscore format"""
+    # This now expects underscore format (e.g., 'comment_tagger' not 'comment-tagger')
     configurations = {
-        'project-finder': {
+        'project_finder': {
             'page_type': 'project-finder',
             'load_server_files': False,
             'preload_asana_data': []
         },
-        'project-dashboard': {
+        'project_dashboard': {
             'page_type': 'project-dashboard',
             'load_server_files': False,
             'preload_asana_data': []
         },
-        'task-view': {
+        'task_view': {
             'page_type': 'task-view',
             'load_server_files': False,
             'preload_asana_data': []
         },
-        'task-search': {
+        'task_search': {
             'page_type': 'search',
             'load_server_files': False,
             'preload_asana_data': []
         },
-        'project-report': {
+        'project_report': {
             'page_type': 'report',
             'load_server_files': False,
             'preload_asana_data': []
         },
-        'comment-tagger': {
+        'comment_tagger': {
             'page_type': 'comment-tagger',
             'load_server_files': True,  # Since we're using server_files for storage
             'preload_asana_data': []

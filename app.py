@@ -22,6 +22,7 @@ from page_handlers import (
 from utils import get_session_id, get_server_files_info, sanitize_form_key
 from task_formatters import format_task_response, format_project_response
 from comment_tagger import handle_comment_tagger_page
+from segmentation_trainer import handle_segmentation_trainer_page
 
 # Initialize application components
 app = create_app()
@@ -179,6 +180,10 @@ def generic_api(page_name):
             return handle_comment_tagger_page(
                 page_name, form_data, session_id, asana_client
             )
+        elif page_type == 'segmentation-trainer':
+            return handle_segmentation_trainer_page(
+                page_name, form_data, session_id, asana_client
+            )
         else:
             return jsonify({'error': f'Unknown page type: {page_type}'}), 400
     
@@ -229,30 +234,30 @@ def get_task(task_gid):
 
 # Helper functions
 def get_page_configuration(page_name):
-    """Get configuration for a specific page - expects underscore format"""
-    # This now expects underscore format (e.g., 'comment_tagger' not 'comment-tagger')
+    """Get configuration for a specific page - uses exact page name"""
+    # Uses exact page name as provided (with hyphens or underscores as appropriate)
     configurations = {
-        'project_finder': {
+        'project-finder': {
             'page_type': 'project-finder',
             'load_server_files': False,
             'preload_asana_data': []
         },
-        'project_dashboard': {
+        'project-dashboard': {
             'page_type': 'project-dashboard',
             'load_server_files': False,
             'preload_asana_data': []
         },
-        'task_view': {
+        'task-view': {
             'page_type': 'task-view',
             'load_server_files': False,
             'preload_asana_data': []
         },
-        'task_search': {
+        'task-search': {
             'page_type': 'search',
             'load_server_files': False,
             'preload_asana_data': []
         },
-        'project_report': {
+        'project-report': {
             'page_type': 'report',
             'load_server_files': False,
             'preload_asana_data': []
@@ -260,6 +265,21 @@ def get_page_configuration(page_name):
         'comment_tagger': {
             'page_type': 'comment-tagger',
             'load_server_files': True,  # Since we're using server_files for storage
+            'preload_asana_data': []
+        },
+        'comment-tagger': {  # Support both naming conventions
+            'page_type': 'comment-tagger',
+            'load_server_files': True,
+            'preload_asana_data': []
+        },
+        'segmentation_trainer': {
+            'page_type': 'segmentation-trainer',
+            'load_server_files': True,
+            'preload_asana_data': []
+        },
+        'segmentation-trainer': {  # Support both naming conventions
+            'page_type': 'segmentation-trainer',
+            'load_server_files': True,
             'preload_asana_data': []
         }
     }

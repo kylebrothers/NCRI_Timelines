@@ -39,10 +39,8 @@ class CommentSegmenter:
         # Parse text with SpaCy
         doc = self.nlp(text)
         
-        # Extract all potential dates using dateparser
-        date_results = dateparser.search.search_dates(text, 
-                                                       languages=['en'],
-                                                       settings={'PREFER_DATES_FROM': 'past'})
+        # Extract dates using multiple methods
+        date_results = self.find_dates_in_text(text)
         
         if not date_results:
             # No dates found - return entire text as one segment
@@ -59,6 +57,54 @@ class CommentSegmenter:
         
         return segments
     
+    def find_dates_in_text(self, text: str) -> List[Dict]:
+        """
+        Find dates in text using regex and dateparser
+        """
+        import re
+        
+        # Common date patterns
+        date_patterns = [
+            (r'\d{1,2}/\d{1,2}/\d{2,4}', 'slash'),  # MM/DD/YYYY or MM/DD/YY
+            (r'\d{1,2}-\d{1,2}-\d{2,4}', 'dash'),   # MM-DD-YYYY
+            (r'\d{4}-\d{1,2}-\d{1,2}', 'iso'),      # YYYY-MM-DD
+            (r'\d{1,2}\.\d{1,2}\.\d{2,4}', 'dot'),  # MM.DD.YYYY
+            (r'\d{1,2}/\d{1,2}', 'short'),          # MM/DD (no year)
+        ]
+        
+        date_results = []
+        
+        for pattern, format_type in date_patterns:
+            for match in re.finditer(pattern, text):
+                date_str = match.group()
+                position = match.start()
+                
+                # Try to parse the date string
+                parsed_date = None
+                try:
+                    # Use dateparser to parse the matched string
+                    parsed_date = dateparser.parse(date_str, settings={'PREFER_DATES_FROM': 'past'})
+                except:
+                    pass
+                
+                if parsed_date:
+                    date_results.append({
+                        'date_str': date_str,
+                        'date_obj': parsed_date,
+                        'position': position,
+                        'format_type': format_type
+                    })
+        
+        # Remove duplicates at same position
+        seen_positions = set()
+        unique_results = []
+        for result in date_results:
+            if result['position'] not in seen_positions:
+                seen_positions.add(result['position'])
+                unique_results.append(result)
+        
+        return sorted(unique_results, key=lambda x: x['position'])
+    
     def create_intelligent_segments(self, doc, date_results, original_text, asana_date):
         """
         Create segments based on sentence structure and date positions
@@ -68,17 +114,15 @@ class CommentSegmenter:
         
         # Map dates to their sentence indices
         date_sentence_map = []
-        for date_str, date_obj in date_results:
-            date_pos = original_text.find(date_str)
-            if date_pos == -1:
-                continue
-                
+        for date_info in date_results:
+            date_pos = date_info['position']
+            
             # Find which sentence contains this date
             for sent_idx, sent in enumerate(sentences):
                 if sent.start_char <= date_pos < sent.end_char:
                     date_sentence_map.append({
-                        'date_str': date_str,
-                        'date_obj': date_obj,
+                        'date_str': date_info['date_str'],
+                        'date_obj': date_info['date_obj'],
                         'position': date_pos,
                         'sentence_idx': sent_idx,
                         'sentence': sent

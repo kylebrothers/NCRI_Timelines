@@ -126,44 +126,84 @@ class SegmentationTrainer:
 
 def handle_segmentation_trainer_page(page_name, form_data, session_id, asana_client):
     """Handle segmentation training operations"""
+    import time
+    
     try:
         operation = form_data.get('operation')
         trainer = SegmentationTrainer()
         
         if operation == 'load_for_segmentation':
-            # Load comments for segmentation training
+            start_time = time.time()
+            
+            # Load comments for segmentation training - LIMITED TO 50 AT A TIME
             project_gid = form_data.get('project_gid')
             if not project_gid:
                 return jsonify({'error': 'Project GID required'}), 400
             
             # Get project info
+            logger.info(f"Fetching project {project_gid}")
+            project_start = time.time()
             project = asana_client.get_project(project_gid)
+            logger.info(f"Project fetch took {time.time() - project_start:.2f}s")
             
             # Get tasks with comments
+            tasks_start = time.time()
             tasks = asana_client.get_project_tasks(project_gid)
-            comments_for_training = []
+            logger.info(f"Fetched {len(tasks)} tasks in {time.time() - tasks_start:.2f}s")
             
-            for task in tasks:
+            comments_for_training = []
+            total_comments_checked = 0
+            total_already_processed = 0
+            
+            # Limit to 50 unprocessed comments
+            MAX_COMMENTS = 50
+            
+            stories_fetch_time = 0
+            segmentation_time = 0
+            
+            for task_idx, task in enumerate(tasks):
+                # Stop if we have enough comments
+                if len(comments_for_training) >= MAX_COMMENTS:
+                    logger.info(f"Reached max comments limit at task {task_idx} of {len(tasks)}")
+                    break
+                    
                 task_gid = task.get('gid')
                 if not task_gid:
                     continue
                 
                 # Get task stories (comments)
-                stories = asana_client.get_task_stories(task_gid)
+                try:
+                    stories_start = time.time()
+                    stories = asana_client.get_task_stories(task_gid)
+                    stories_fetch_time += time.time() - stories_start
+                    
+                    if task_idx % 10 == 0:
+                        logger.info(f"Processing task {task_idx}: fetched {len(stories)} stories")
+                except Exception as e:
+                    logger.warning(f"Error fetching stories for task {task_gid}: {e}")
+                    continue
                 
                 for story in stories:
+                    # Stop if we have enough comments
+                    if len(comments_for_training) >= MAX_COMMENTS:
+                        break
+                        
                     if story.get('type') == 'comment' and story.get('text'):
                         story_gid = story.get('gid')
+                        total_comments_checked += 1
                         
                         # Skip if already processed
                         if trainer.is_comment_processed(story_gid):
+                            total_already_processed += 1
                             continue
                         
                         comment_text = story.get('text', '')
                         asana_date = story.get('created_at', '').split('T')[0] if story.get('created_at') else None
                         
                         # Get automatic segmentation
+                        seg_start = time.time()
                         segments = trainer.segmenter.extract_dates_and_segments(comment_text, asana_date)
+                        segmentation_time += time.time() - seg_start
                         
                         comments_for_training.append({
                             'task_gid': task_gid,
@@ -175,6 +215,19 @@ def handle_segmentation_trainer_page(page_name, form_data, session_id, asana_cli
                             'created_by': story.get('created_by', {}).get('name', 'Unknown')
                         })
             
+            total_time = time.time() - start_time
+            
+            # Log timing breakdown
+            logger.info(f"""
+                Loading complete:
+                - Total time: {total_time:.2f}s
+                - Stories fetch time: {stories_fetch_time:.2f}s
+                - Segmentation time: {segmentation_time:.2f}s
+                - Comments loaded: {len(comments_for_training)}
+                - Comments checked: {total_comments_checked}
+                - Already processed: {total_already_processed}
+            """)
+            
             return jsonify({
                 'success': True,
                 'project': {
@@ -184,6 +237,8 @@ def handle_segmentation_trainer_page(page_name, form_data, session_id, asana_cli
                 'comments': comments_for_training,
                 'total_unprocessed': len(comments_for_training),
                 'total_processed': len(trainer.processed_comments),
+                'batch_size': MAX_COMMENTS,
+                'message': f"Loaded {len(comments_for_training)} comments (max {MAX_COMMENTS} per session)",
                 'session_id': session_id
             })
         

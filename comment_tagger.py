@@ -8,7 +8,7 @@ import re
 import logging
 import spacy
 import dateparser
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Any
 from flask import jsonify
 from collections import defaultdict
@@ -31,6 +31,12 @@ class CommentSegmenter:
     def extract_dates_and_segments(self, text: str, asana_date: str = None) -> List[Dict]:
         """
         Extract dates and create intelligent segments using NLP
+        
+        New algorithm:
+        1. Split at colons, sentence boundaries, and newlines
+        2. Check each segment for dates or time references
+        3. Merge segments without dates/time refs with previous segment
+        4. Continue until all segments have dates or only one segment remains
         """
         if not self.nlp:
             # Fallback to simple segmentation if SpaCy not available
@@ -39,209 +45,242 @@ class CommentSegmenter:
         # Parse text with SpaCy
         doc = self.nlp(text)
         
-        # Extract dates using multiple methods
-        date_results = self.find_dates_in_text(text)
+        # Step 1: Create initial segments at boundaries
+        initial_segments = self.create_initial_segments(doc, text)
         
-        if not date_results:
-            # No dates found - return entire text as one segment
-            return [{
-                'text': text,
-                'date': asana_date or datetime.now().strftime('%Y-%m-%d'),
-                'dateSource': 'asana_timestamp' if asana_date else 'default',
-                'startIndex': 0,
-                'endIndex': len(text)
-            }]
+        # Step 2: Merge segments without dates/time references
+        final_segments = self.merge_segments_without_dates(initial_segments, doc, asana_date)
         
-        # Analyze sentence structure to determine segmentation
-        segments = self.create_intelligent_segments(doc, date_results, text, asana_date)
-        
-        return segments
+        return final_segments
     
-    def find_dates_in_text(self, text: str) -> List[Dict]:
+    def create_initial_segments(self, doc, text: str) -> List[Dict]:
         """
-        Find dates in text using regex and dateparser
-        """
-        import re
-        
-        # Common date patterns
-        date_patterns = [
-            (r'\d{1,2}/\d{1,2}/\d{2,4}', 'slash'),  # MM/DD/YYYY or MM/DD/YY
-            (r'\d{1,2}-\d{1,2}-\d{2,4}', 'dash'),   # MM-DD-YYYY
-            (r'\d{4}-\d{1,2}-\d{1,2}', 'iso'),      # YYYY-MM-DD
-            (r'\d{1,2}\.\d{1,2}\.\d{2,4}', 'dot'),  # MM.DD.YYYY
-            (r'\d{1,2}/\d{1,2}', 'short'),          # MM/DD (no year)
-        ]
-        
-        date_results = []
-        
-        for pattern, format_type in date_patterns:
-            for match in re.finditer(pattern, text):
-                date_str = match.group()
-                position = match.start()
-                
-                # Try to parse the date string
-                parsed_date = None
-                try:
-                    # Use dateparser to parse the matched string
-                    parsed_date = dateparser.parse(date_str, settings={'PREFER_DATES_FROM': 'past'})
-                except:
-                    pass
-                
-                if parsed_date:
-                    date_results.append({
-                        'date_str': date_str,
-                        'date_obj': parsed_date,
-                        'position': position,
-                        'format_type': format_type
-                    })
-        
-        # Remove duplicates at same position
-        seen_positions = set()
-        unique_results = []
-        for result in date_results:
-            if result['position'] not in seen_positions:
-                seen_positions.add(result['position'])
-                unique_results.append(result)
-        
-        return sorted(unique_results, key=lambda x: x['position'])
-    
-    def create_intelligent_segments(self, doc, date_results, original_text, asana_date):
-        """
-        Create segments based on sentence structure and date positions
+        Create initial segments at:
+        - Colons followed by space (": ")
+        - Sentence boundaries
+        - Newlines
         """
         segments = []
-        sentences = list(doc.sents)
+        boundaries = set()
         
-        # Map dates to their sentence indices
-        date_sentence_map = []
-        for date_info in date_results:
-            date_pos = date_info['position']
-            
-            # Find which sentence contains this date
-            for sent_idx, sent in enumerate(sentences):
-                if sent.start_char <= date_pos < sent.end_char:
-                    date_sentence_map.append({
-                        'date_str': date_info['date_str'],
-                        'date_obj': date_info['date_obj'],
-                        'position': date_pos,
-                        'sentence_idx': sent_idx,
-                        'sentence': sent
-                    })
-                    break
+        # Find colon boundaries
+        colon_pattern = re.compile(r':\s')
+        for match in colon_pattern.finditer(text):
+            boundaries.add(match.end())
         
-        # Determine segmentation strategy
-        if len(date_sentence_map) == 1:
-            # Single date - check if it's a divider or embedded
-            date_info = date_sentence_map[0]
-            date_pos_in_sent = date_info['position'] - date_info['sentence'].start_char
-            sent_text = date_info['sentence'].text
-            
-            # Check if date is at the beginning of a sentence (likely a divider)
-            if date_pos_in_sent < 15 and date_info['sentence_idx'] > 0:
-                # Date starts a new section
-                # Segment 1: Everything before this sentence
-                seg1_text = original_text[:date_info['sentence'].start_char].strip()
-                if seg1_text:
-                    segments.append({
-                        'text': seg1_text,
-                        'date': asana_date or datetime.now().strftime('%Y-%m-%d'),
-                        'dateSource': 'asana_timestamp',
-                        'startIndex': 0,
-                        'endIndex': date_info['sentence'].start_char
-                    })
-                
-                # Segment 2: From this sentence onward
-                seg2_text = original_text[date_info['sentence'].start_char:].strip()
-                segments.append({
-                    'text': seg2_text,
-                    'date': date_info['date_obj'].strftime('%Y-%m-%d'),
-                    'dateSource': 'extracted',
-                    'startIndex': date_info['sentence'].start_char,
-                    'endIndex': len(original_text)
-                })
-            else:
-                # Date is embedded - treat entire text as one segment
-                segments.append({
-                    'text': original_text,
-                    'date': date_info['date_obj'].strftime('%Y-%m-%d'),
-                    'dateSource': 'extracted',
-                    'startIndex': 0,
-                    'endIndex': len(original_text)
-                })
+        # Find sentence boundaries using SpaCy
+        for sent in doc.sents:
+            if sent.end_char < len(text):
+                boundaries.add(sent.end_char)
         
-        elif len(date_sentence_map) > 1:
-            # Multiple dates - check for pattern
-            segments = self.segment_by_date_patterns(date_sentence_map, sentences, original_text, asana_date)
+        # Find newline boundaries
+        for i, char in enumerate(text):
+            if char == '\n':
+                boundaries.add(i + 1)
         
-        else:
-            # No valid dates found after parsing
-            segments.append({
-                'text': original_text,
-                'date': asana_date or datetime.now().strftime('%Y-%m-%d'),
-                'dateSource': 'asana_timestamp',
-                'startIndex': 0,
-                'endIndex': len(original_text)
-            })
+        # Sort boundaries
+        sorted_boundaries = sorted(list(boundaries))
         
-        return segments
-    
-    def segment_by_date_patterns(self, date_map, sentences, text, asana_date):
-        """
-        Handle multiple dates - look for patterns like date-prefixed entries
-        """
-        segments = []
-        
-        # Check if dates appear to be section headers (at sentence starts)
-        section_dates = []
-        for date_info in date_map:
-            date_pos_in_sent = date_info['position'] - date_info['sentence'].start_char
-            # Is this date at or near the start of its sentence?
-            if date_pos_in_sent < 15:
-                section_dates.append(date_info)
-        
-        if not section_dates:
-            # All dates are embedded - treat as single segment with first date
-            segments.append({
-                'text': text,
-                'date': date_map[0]['date_obj'].strftime('%Y-%m-%d'),
-                'dateSource': 'extracted',
-                'startIndex': 0,
-                'endIndex': len(text)
-            })
-        else:
-            # Create segments based on section dates
-            for i, date_info in enumerate(section_dates):
-                start_pos = date_info['sentence'].start_char
-                
-                # Find end position (start of next section or end of text)
-                if i + 1 < len(section_dates):
-                    end_pos = section_dates[i + 1]['sentence'].start_char
-                else:
-                    end_pos = len(text)
-                
-                segment_text = text[start_pos:end_pos].strip()
-                if segment_text:
+        # Create segments
+        last_pos = 0
+        for boundary in sorted_boundaries:
+            if boundary > last_pos:
+                segment_text = text[last_pos:boundary].strip()
+                if segment_text:  # Only add non-empty segments
                     segments.append({
                         'text': segment_text,
-                        'date': date_info['date_obj'].strftime('%Y-%m-%d'),
-                        'dateSource': 'extracted',
-                        'startIndex': start_pos,
-                        'endIndex': end_pos
+                        'startIndex': last_pos,
+                        'endIndex': boundary,
+                        'has_date_or_time': False  # Will be checked next
                     })
-            
-            # Check for text before first section
-            if section_dates and section_dates[0]['sentence'].start_char > 20:
-                prefix_text = text[:section_dates[0]['sentence'].start_char].strip()
-                if prefix_text:
-                    segments.insert(0, {
-                        'text': prefix_text,
-                        'date': asana_date or datetime.now().strftime('%Y-%m-%d'),
-                        'dateSource': 'asana_timestamp',
-                        'startIndex': 0,
-                        'endIndex': section_dates[0]['sentence'].start_char
-                    })
+                last_pos = boundary
+        
+        # Add final segment
+        if last_pos < len(text):
+            segment_text = text[last_pos:].strip()
+            if segment_text:
+                segments.append({
+                    'text': segment_text,
+                    'startIndex': last_pos,
+                    'endIndex': len(text),
+                    'has_date_or_time': False
+                })
+        
+        # If no segments created, treat entire text as one segment
+        if not segments:
+            segments.append({
+                'text': text,
+                'startIndex': 0,
+                'endIndex': len(text),
+                'has_date_or_time': False
+            })
         
         return segments
+    
+    def has_date_or_time_reference(self, segment_text: str, asana_date: str = None) -> bool:
+        """
+        Check if segment contains:
+        - An explicit date (equal to or before asana_date)
+        - Time references to present/past (today, yesterday, X days/weeks ago, etc.)
+        """
+        segment_lower = segment_text.lower()
+        
+        # Check for past/present time references
+        time_patterns = [
+            r'\btoday\b',
+            r'\byesterday\b',
+            r'\b\d+\s*(day|week|month|year)s?\s*ago\b',
+            r'\blast\s*(week|month|year)\b',
+            r'\bthis\s*(morning|afternoon|evening)\b',
+            r'\bearlier\b',
+            r'\bpreviously\b',
+            r'\bbefore\b',
+            r'\balready\b',
+        ]
+        
+        for pattern in time_patterns:
+            if re.search(pattern, segment_lower):
+                return True
+        
+        # Check for explicit dates using dateparser
+        # Look for common date patterns
+        date_patterns = [
+            r'\d{1,2}/\d{1,2}/\d{2,4}',  # MM/DD/YYYY or MM/DD/YY
+            r'\d{1,2}-\d{1,2}-\d{2,4}',   # MM-DD-YYYY
+            r'\d{4}-\d{1,2}-\d{1,2}',     # YYYY-MM-DD
+            r'\d{1,2}\.\d{1,2}\.\d{2,4}', # MM.DD.YYYY
+            r'\d{1,2}/\d{1,2}',           # MM/DD (no year)
+            r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}',  # Month DD
+            r'\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)',  # DD Month
+        ]
+        
+        for pattern in date_patterns:
+            if re.search(pattern, segment_lower, re.IGNORECASE):
+                # Found a date pattern - check if it's in the past
+                match = re.search(pattern, segment_text, re.IGNORECASE)
+                if match:
+                    date_str = match.group()
+                    try:
+                        parsed_date = dateparser.parse(date_str, settings={'PREFER_DATES_FROM': 'past'})
+                        if parsed_date:
+                            # Check if date is in the past or same as asana_date
+                            if asana_date:
+                                asana_datetime = dateparser.parse(asana_date)
+                                if asana_datetime and parsed_date <= asana_datetime:
+                                    return True
+                            else:
+                                # No asana date, check if before today
+                                if parsed_date <= datetime.now():
+                                    return True
+                    except:
+                        pass
+        
+        # Use SpaCy to find DATE entities
+        if self.nlp:
+            doc = self.nlp(segment_text)
+            for ent in doc.ents:
+                if ent.label_ in ['DATE', 'TIME']:
+                    # Check if it refers to past/present
+                    ent_lower = ent.text.lower()
+                    if any(word in ent_lower for word in ['today', 'yesterday', 'ago', 'last', 'earlier']):
+                        return True
+                    # Try to parse the date
+                    try:
+                        parsed_date = dateparser.parse(ent.text, settings={'PREFER_DATES_FROM': 'past'})
+                        if parsed_date:
+                            if asana_date:
+                                asana_datetime = dateparser.parse(asana_date)
+                                if asana_datetime and parsed_date <= asana_datetime:
+                                    return True
+                            elif parsed_date <= datetime.now():
+                                return True
+                    except:
+                        pass
+        
+        return False
+    
+    def merge_segments_without_dates(self, segments: List[Dict], doc, asana_date: str) -> List[Dict]:
+        """
+        Merge segments that don't contain dates/time references with the previous segment.
+        Continue until all segments have dates or only one segment remains.
+        """
+        # First, mark which segments have dates/time references
+        for segment in segments:
+            segment['has_date_or_time'] = self.has_date_or_time_reference(segment['text'], asana_date)
+        
+        # Keep merging until all segments have dates or we have only one segment
+        while True:
+            # Check if we're done
+            segments_without_dates = [s for s in segments if not s['has_date_or_time']]
+            if len(segments_without_dates) == 0 or len(segments) == 1:
+                break
+            
+            # Find first segment without date/time and merge with previous
+            new_segments = []
+            i = 0
+            while i < len(segments):
+                if i > 0 and not segments[i]['has_date_or_time']:
+                    # Merge with previous segment
+                    prev_segment = new_segments[-1]
+                    merged_text = prev_segment['text'] + ' ' + segments[i]['text']
+                    prev_segment['text'] = merged_text
+                    prev_segment['endIndex'] = segments[i]['endIndex']
+                    # Re-check if merged segment now has date/time
+                    prev_segment['has_date_or_time'] = self.has_date_or_time_reference(merged_text, asana_date)
+                else:
+                    new_segments.append(segments[i].copy())
+                i += 1
+            
+            segments = new_segments
+        
+        # Format final segments for output
+        final_segments = []
+        for i, segment in enumerate(segments):
+            # Determine date for segment
+            segment_date = self.extract_segment_date(segment['text'], asana_date)
+            
+            final_segments.append({
+                'text': segment['text'],
+                'date': segment_date,
+                'dateSource': 'extracted' if segment['has_date_or_time'] else 'asana_timestamp',
+                'startIndex': segment['startIndex'],
+                'endIndex': segment['endIndex']
+            })
+        
+        return final_segments
+    
+    def extract_segment_date(self, segment_text: str, asana_date: str) -> str:
+        """
+        Extract the most relevant date from a segment.
+        Returns YYYY-MM-DD format.
+        """
+        # Try to find and parse dates in the segment
+        date_patterns = [
+            r'\d{1,2}/\d{1,2}/\d{2,4}',
+            r'\d{1,2}-\d{1,2}-\d{2,4}',
+            r'\d{4}-\d{1,2}-\d{1,2}',
+            r'\d{1,2}\.\d{1,2}\.\d{2,4}',
+            r'\d{1,2}/\d{1,2}',
+        ]
+        
+        for pattern in date_patterns:
+            match = re.search(pattern, segment_text)
+            if match:
+                try:
+                    parsed_date = dateparser.parse(match.group(), settings={'PREFER_DATES_FROM': 'past'})
+                    if parsed_date:
+                        return parsed_date.strftime('%Y-%m-%d')
+                except:
+                    pass
+        
+        # Check for relative dates
+        if 'today' in segment_text.lower():
+            return datetime.now().strftime('%Y-%m-%d')
+        elif 'yesterday' in segment_text.lower():
+            return (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        
+        # Default to asana date or today
+        return asana_date or datetime.now().strftime('%Y-%m-%d')
     
     def simple_fallback_segmentation(self, text: str, asana_date: str) -> List[Dict]:
         """

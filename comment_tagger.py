@@ -38,8 +38,10 @@ class CommentSegmenter:
         3. Merge segments without dates/time refs with previous segment
         4. Continue until all segments have dates or only one segment remains
         """
+        logger.info(f"Starting segmentation for text of length {len(text)}")
+        
         if not self.nlp:
-            # Fallback to simple segmentation if SpaCy not available
+            logger.warning("SpaCy not available, using fallback segmentation")
             return self.simple_fallback_segmentation(text, asana_date)
         
         # Parse text with SpaCy
@@ -47,9 +49,11 @@ class CommentSegmenter:
         
         # Step 1: Create initial segments at boundaries
         initial_segments = self.create_initial_segments(doc, text)
+        logger.info(f"Created {len(initial_segments)} initial segments")
         
         # Step 2: Merge segments without dates/time references
         final_segments = self.merge_segments_without_dates(initial_segments, doc, asana_date)
+        logger.info(f"Final segmentation: {len(final_segments)} segments")
         
         return final_segments
     
@@ -80,6 +84,7 @@ class CommentSegmenter:
         
         # Sort boundaries
         sorted_boundaries = sorted(list(boundaries))
+        logger.debug(f"Found {len(sorted_boundaries)} boundary positions")
         
         # Create segments
         last_pos = 0
@@ -123,6 +128,10 @@ class CommentSegmenter:
         - An explicit date (equal to or before asana_date)
         - Time references to present/past (today, yesterday, X days/weeks ago, etc.)
         """
+        # Quick length check - very short segments unlikely to have dates
+        if len(segment_text) < 3:
+            return False
+            
         segment_lower = segment_text.lower()
         
         # Check for past/present time references
@@ -140,6 +149,7 @@ class CommentSegmenter:
         
         for pattern in time_patterns:
             if re.search(pattern, segment_lower):
+                logger.debug(f"Found time pattern '{pattern}' in segment")
                 return True
         
         # Check for explicit dates using dateparser
@@ -167,35 +177,43 @@ class CommentSegmenter:
                             if asana_date:
                                 asana_datetime = dateparser.parse(asana_date)
                                 if asana_datetime and parsed_date <= asana_datetime:
+                                    logger.debug(f"Found valid past date: {date_str}")
                                     return True
                             else:
                                 # No asana date, check if before today
                                 if parsed_date <= datetime.now():
+                                    logger.debug(f"Found valid past date: {date_str}")
                                     return True
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Failed to parse date '{date_str}': {e}")
         
-        # Use SpaCy to find DATE entities
+        # Use SpaCy to find DATE entities (only if we have SpaCy)
         if self.nlp:
-            doc = self.nlp(segment_text)
-            for ent in doc.ents:
-                if ent.label_ in ['DATE', 'TIME']:
-                    # Check if it refers to past/present
-                    ent_lower = ent.text.lower()
-                    if any(word in ent_lower for word in ['today', 'yesterday', 'ago', 'last', 'earlier']):
-                        return True
-                    # Try to parse the date
-                    try:
-                        parsed_date = dateparser.parse(ent.text, settings={'PREFER_DATES_FROM': 'past'})
-                        if parsed_date:
-                            if asana_date:
-                                asana_datetime = dateparser.parse(asana_date)
-                                if asana_datetime and parsed_date <= asana_datetime:
+            try:
+                doc = self.nlp(segment_text[:1000])  # Limit text length for SpaCy
+                for ent in doc.ents:
+                    if ent.label_ in ['DATE', 'TIME']:
+                        # Check if it refers to past/present
+                        ent_lower = ent.text.lower()
+                        if any(word in ent_lower for word in ['today', 'yesterday', 'ago', 'last', 'earlier']):
+                            logger.debug(f"SpaCy found time entity: {ent.text}")
+                            return True
+                        # Try to parse the date
+                        try:
+                            parsed_date = dateparser.parse(ent.text, settings={'PREFER_DATES_FROM': 'past'})
+                            if parsed_date:
+                                if asana_date:
+                                    asana_datetime = dateparser.parse(asana_date)
+                                    if asana_datetime and parsed_date <= asana_datetime:
+                                        logger.debug(f"SpaCy found valid past date: {ent.text}")
+                                        return True
+                                elif parsed_date <= datetime.now():
+                                    logger.debug(f"SpaCy found valid past date: {ent.text}")
                                     return True
-                            elif parsed_date <= datetime.now():
-                                return True
-                    except:
-                        pass
+                        except:
+                            pass
+            except Exception as e:
+                logger.warning(f"SpaCy processing failed: {e}")
         
         return False
     
@@ -204,20 +222,34 @@ class CommentSegmenter:
         Merge segments that don't contain dates/time references with the previous segment.
         Continue until all segments have dates or only one segment remains.
         """
+        logger.info(f"Starting merge process with {len(segments)} segments")
+        
         # First, mark which segments have dates/time references
-        for segment in segments:
-            segment['has_date_or_time'] = self.has_date_or_time_reference(segment['text'], asana_date)
+        for i, segment in enumerate(segments):
+            has_date = self.has_date_or_time_reference(segment['text'], asana_date)
+            segment['has_date_or_time'] = has_date
+            logger.debug(f"Segment {i}: has_date={has_date}, text_preview='{segment['text'][:50]}...'")
         
         # Keep merging until all segments have dates or we have only one segment
-        while True:
+        max_iterations = 100  # Safety limit to prevent infinite loops
+        iteration = 0
+        
+        while iteration < max_iterations:
+            iteration += 1
+            
             # Check if we're done
             segments_without_dates = [s for s in segments if not s['has_date_or_time']]
+            logger.debug(f"Iteration {iteration}: {len(segments)} segments, {len(segments_without_dates)} without dates")
+            
             if len(segments_without_dates) == 0 or len(segments) == 1:
+                logger.info(f"Merge complete after {iteration} iterations")
                 break
             
             # Find first segment without date/time and merge with previous
+            merged_any = False
             new_segments = []
             i = 0
+            
             while i < len(segments):
                 if i > 0 and not segments[i]['has_date_or_time']:
                     # Merge with previous segment
@@ -227,11 +259,21 @@ class CommentSegmenter:
                     prev_segment['endIndex'] = segments[i]['endIndex']
                     # Re-check if merged segment now has date/time
                     prev_segment['has_date_or_time'] = self.has_date_or_time_reference(merged_text, asana_date)
+                    logger.debug(f"Merged segment {i} with previous, new has_date={prev_segment['has_date_or_time']}")
+                    merged_any = True
                 else:
                     new_segments.append(segments[i].copy())
                 i += 1
             
             segments = new_segments
+            
+            # Check if we made any progress
+            if not merged_any:
+                logger.warning("No segments were merged in this iteration - breaking to prevent infinite loop")
+                break
+        
+        if iteration >= max_iterations:
+            logger.error(f"Reached maximum iterations ({max_iterations}) - stopping merge to prevent infinite loop")
         
         # Format final segments for output
         final_segments = []
@@ -286,7 +328,7 @@ class CommentSegmenter:
         """
         Simple fallback if SpaCy is not available
         """
-        # Just return the whole text as one segment
+        logger.info("Using simple fallback segmentation")
         return [{
             'text': text,
             'date': asana_date or datetime.now().strftime('%Y-%m-%d'),

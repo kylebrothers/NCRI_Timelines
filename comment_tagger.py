@@ -408,7 +408,7 @@ class TagSuggester:
             # Aggregate tags from similar segments with confidence scores
             tag_scores = defaultdict(float)
             for idx in top_indices:
-                similarity = similarities[idx]
+                similarity = float(similarities[idx])  # Convert to native Python float
                 if similarity > 0.1:  # Minimum similarity threshold
                     for tag in self.segment_tags[idx]:
                         tag_scores[tag] += similarity
@@ -419,8 +419,8 @@ class TagSuggester:
                 suggestions = [
                     {
                         'tag': tag,
-                        'confidence': score / max_score,  # Normalize to 0-1
-                        'auto_select': (score / max_score) > 0.7
+                        'confidence': float(score / max_score),  # Convert to native Python float
+                        'auto_select': bool((score / max_score) > 0.7)  # Convert to native Python bool
                     }
                     for tag, score in sorted(tag_scores.items(), key=lambda x: x[1], reverse=True)
                 ]
@@ -749,7 +749,10 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
                     suggestions = tagger.suggest_tags_for_segment(sample['comment'])
                     if suggestions and suggestions[0]['tag'] in sample['tags']:
                         correct += 1
-                stats['model_accuracy'] = (correct / total) * 100
+                stats['model_accuracy'] = float((correct / total) * 100)  # Convert to native Python float
+            
+            # Convert all NumPy types to native Python types for JSON serialization
+            stats['tag_usage'] = dict(stats['tag_usage'])  # Ensure it's a regular dict
             
             return jsonify({
                 'success': True,

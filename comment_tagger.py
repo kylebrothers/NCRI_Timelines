@@ -1,5 +1,5 @@
 """
-Comment tagging page handler with SpaCy NLP for intelligent segmentation
+Comment tagging page handler with SpaCy NLP for intelligent segmentation and tag suggestions
 """
 
 import os
@@ -8,10 +8,13 @@ import re
 import logging
 import spacy
 import dateparser
+import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Any
 from flask import jsonify
 from collections import defaultdict
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +30,23 @@ class CommentSegmenter:
     
     def __init__(self):
         self.nlp = nlp
+        # Load segmentation training data if available
+        self.load_training_data()
         
+    def load_training_data(self):
+        """Load segmentation training data to improve accuracy"""
+        try:
+            training_path = "/app/server_files/segmentation_trainer/segmentation_training.json"
+            if os.path.exists(training_path):
+                with open(training_path, 'r') as f:
+                    self.training_data = json.load(f)
+                logger.info(f"Loaded {len(self.training_data)} segmentation training examples")
+            else:
+                self.training_data = []
+        except Exception as e:
+            logger.warning(f"Could not load segmentation training data: {e}")
+            self.training_data = []
+    
     def extract_dates_and_segments(self, text: str, asana_date: str = None) -> List[Dict]:
         """
         Extract dates and create intelligent segments using NLP
@@ -338,6 +357,81 @@ class CommentSegmenter:
         }]
 
 
+class TagSuggester:
+    """Intelligent tag suggestion using NLP and similarity matching"""
+    
+    def __init__(self):
+        self.vectorizer = TfidfVectorizer(max_features=100, stop_words='english')
+        self.segment_vectors = None
+        self.segment_tags = []
+        self.trained_segments = []
+        
+    def train_on_tagged_segments(self, tagged_segments: List[Dict]):
+        """
+        Train the suggester on previously tagged segments
+        Format: [{'text': 'segment text', 'tags': ['tag1', 'tag2']}, ...]
+        """
+        if not tagged_segments:
+            return
+            
+        self.trained_segments = tagged_segments
+        self.segment_tags = [seg['tags'] for seg in tagged_segments]
+        
+        # Extract text from segments
+        texts = [seg['text'] for seg in tagged_segments]
+        
+        # Fit vectorizer and transform texts
+        try:
+            self.segment_vectors = self.vectorizer.fit_transform(texts)
+            logger.info(f"Trained tag suggester on {len(tagged_segments)} segments")
+        except Exception as e:
+            logger.error(f"Error training tag suggester: {e}")
+    
+    def suggest_tags(self, segment_text: str, top_k: int = 5) -> List[Dict]:
+        """
+        Suggest tags for a segment based on similarity to previously tagged segments
+        Returns list of {'tag': tag_name, 'confidence': score}
+        """
+        if self.segment_vectors is None or len(self.trained_segments) == 0:
+            return []
+        
+        try:
+            # Transform new segment
+            segment_vector = self.vectorizer.transform([segment_text])
+            
+            # Calculate similarities
+            similarities = cosine_similarity(segment_vector, self.segment_vectors)[0]
+            
+            # Get top similar segments
+            top_indices = np.argsort(similarities)[-top_k:][::-1]
+            
+            # Aggregate tags from similar segments with confidence scores
+            tag_scores = defaultdict(float)
+            for idx in top_indices:
+                similarity = similarities[idx]
+                if similarity > 0.1:  # Minimum similarity threshold
+                    for tag in self.segment_tags[idx]:
+                        tag_scores[tag] += similarity
+            
+            # Normalize scores and create suggestions
+            if tag_scores:
+                max_score = max(tag_scores.values())
+                suggestions = [
+                    {
+                        'tag': tag,
+                        'confidence': score / max_score,  # Normalize to 0-1
+                        'auto_select': (score / max_score) > 0.7
+                    }
+                    for tag, score in sorted(tag_scores.items(), key=lambda x: x[1], reverse=True)
+                ]
+                return suggestions[:top_k]
+            
+        except Exception as e:
+            logger.error(f"Error suggesting tags: {e}")
+        
+        return []
+
+
 class CommentTagger:
     """Handles comment tagging operations and pattern learning"""
     
@@ -345,6 +439,7 @@ class CommentTagger:
         self.base_path = base_path
         self.ensure_directories()
         self.segmenter = CommentSegmenter()
+        self.tag_suggester = TagSuggester()
         
         # Load or initialize data structures
         self.tag_definitions = self.load_json("tag_definitions.json", {})
@@ -353,6 +448,9 @@ class CommentTagger:
         self.model_cache = self.load_json("model_cache.json", {})
         self.tagged_comments = self.load_json("tagged_comments.json", {})
         self.segmentation_training = self.load_json("segmentation_training.json", [])
+        
+        # Train the tag suggester on existing data
+        self.train_tag_suggester()
         
     def ensure_directories(self):
         """Create necessary directories if they don't exist"""
@@ -379,6 +477,32 @@ class CommentTagger:
         except Exception as e:
             logger.error(f"Error saving {filename}: {e}")
     
+    def train_tag_suggester(self):
+        """Train the tag suggester on existing tagged segments"""
+        tagged_segments = []
+        
+        # Extract segments from training data
+        for sample in self.training_data:
+            if 'comment' in sample and 'tags' in sample:
+                tagged_segments.append({
+                    'text': sample['comment'],
+                    'tags': sample['tags']
+                })
+        
+        # Also extract from tagged comments if they have segments
+        for story_gid, comment_data in self.tagged_comments.items():
+            if 'segments' in comment_data:
+                for segment in comment_data['segments']:
+                    if 'text' in segment and 'tags' in segment:
+                        tagged_segments.append({
+                            'text': segment['text'],
+                            'tags': segment['tags']
+                        })
+        
+        if tagged_segments:
+            self.tag_suggester.train_on_tagged_segments(tagged_segments)
+            logger.info(f"Trained tag suggester on {len(tagged_segments)} segments")
+    
     def segment_comment(self, comment_text: str, asana_date: str = None) -> List[Dict]:
         """
         Use NLP to intelligently segment the comment
@@ -397,104 +521,37 @@ class CommentTagger:
         self.segmentation_training.append(training_example)
         self.save_json("segmentation_training.json", self.segmentation_training)
     
-    def extract_keywords(self, text: str) -> List[str]:
-        """Extract meaningful keywords from text using SpaCy if available"""
-        if nlp:
-            doc = nlp(text)
-            # Extract nouns, verbs, and named entities
-            keywords = []
-            for token in doc:
-                if token.pos_ in ['NOUN', 'VERB', 'PROPN'] and not token.is_stop:
-                    keywords.append(token.lemma_.lower())
-            
-            # Add named entities
-            for ent in doc.ents:
-                keywords.append(ent.text.lower())
-            
-            return list(set(keywords))
-        else:
-            # Fallback to simple extraction
-            words = re.findall(r'\b[a-z]+\b', text.lower())
-            stopwords = {'i', 'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 
-                        'to', 'for', 'of', 'with', 'by', 'from', 'was', 'were', 'been'}
-            return [w for w in words if w not in stopwords and len(w) > 2]
-    
-    def calculate_tag_confidence(self, comment: str, tag: str) -> float:
-        """Calculate confidence score for a tag based on patterns"""
-        if tag not in self.patterns:
-            return 0.0
+    def suggest_tags_for_segment(self, segment_text: str) -> List[Dict]:
+        """
+        Get tag suggestions for a segment using the trained model
+        """
+        suggestions = self.tag_suggester.suggest_tags(segment_text)
         
-        comment_lower = comment.lower()
-        tag_patterns = self.patterns[tag]
-        
-        # Check keyword matches
-        keyword_score = 0
-        if 'keywords' in tag_patterns:
-            for keyword in tag_patterns['keywords']:
-                if keyword.lower() in comment_lower:
-                    keyword_score += tag_patterns['keywords'][keyword]
-        
-        # Check phrase matches
-        phrase_score = 0
-        if 'phrases' in tag_patterns:
-            for phrase in tag_patterns['phrases']:
-                if phrase.lower() in comment_lower:
-                    phrase_score += tag_patterns['phrases'][phrase]
-        
-        # Combine scores (normalize to 0-1 range)
-        total_score = (keyword_score + phrase_score * 2) / 10
-        return min(1.0, total_score)
-    
-    def suggest_tags(self, comment: str) -> List[Dict[str, Any]]:
-        """Suggest tags for a comment based on learned patterns"""
-        suggestions = []
-        
-        # If we have defined tags, check each one
-        for tag_id, tag_info in self.tag_definitions.items():
-            confidence = self.calculate_tag_confidence(comment, tag_id)
-            if confidence > 0.1:  # Threshold for suggestion
-                suggestions.append({
-                    'tag_id': tag_id,
-                    'tag_name': tag_info.get('name', tag_id),
-                    'confidence': confidence,
-                    'auto_selected': confidence > 0.7  # Auto-select high confidence
-                })
-        
-        # Sort by confidence
-        suggestions.sort(key=lambda x: x['confidence'], reverse=True)
+        # Add tag names from definitions
+        for suggestion in suggestions:
+            tag_id = suggestion['tag']
+            if tag_id in self.tag_definitions:
+                suggestion['tag_name'] = self.tag_definitions[tag_id].get('name', tag_id)
+            else:
+                suggestion['tag_name'] = tag_id
+            suggestion['tag_id'] = tag_id
         
         return suggestions
     
-    def learn_from_tagging(self, comment: str, assigned_tags: List[str]):
-        """Update patterns based on user's tagging decision"""
-        keywords = self.extract_keywords(comment)
-        
-        for tag in assigned_tags:
-            if tag not in self.patterns:
-                self.patterns[tag] = {'keywords': {}, 'phrases': {}}
-            
-            # Update keyword frequencies
-            for keyword in keywords:
-                if ' ' in keyword:  # It's a phrase
-                    if keyword not in self.patterns[tag]['phrases']:
-                        self.patterns[tag]['phrases'][keyword] = 0
-                    self.patterns[tag]['phrases'][keyword] += 1
-                else:  # Single word
-                    if keyword not in self.patterns[tag]['keywords']:
-                        self.patterns[tag]['keywords'][keyword] = 0
-                    self.patterns[tag]['keywords'][keyword] += 1
-        
-        # Save training data
+    def learn_from_tagging(self, segment_text: str, assigned_tags: List[str]):
+        """Update patterns and retrain based on user's tagging decision"""
+        # Add to training data
         self.training_data.append({
-            'comment': comment,
+            'comment': segment_text,
             'tags': assigned_tags,
-            'timestamp': datetime.now().isoformat(),
-            'keywords': keywords
+            'timestamp': datetime.now().isoformat()
         })
         
         # Persist changes
-        self.save_json("patterns.json", self.patterns)
         self.save_json("training_data.json", self.training_data)
+        
+        # Retrain the suggester with new data
+        self.train_tag_suggester()
     
     def is_comment_tagged(self, story_gid: str) -> bool:
         """Check if a comment has already been tagged"""
@@ -511,7 +568,28 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
         operation = form_data.get('operation')
         tagger = CommentTagger()
         
-        if operation == 'load_project_comments':
+        if operation == 'segment_comment':
+            # Segment a single comment using SpaCy
+            comment_text = form_data.get('comment_text')
+            asana_date = form_data.get('asana_date')
+            
+            if not comment_text:
+                return jsonify({'error': 'Comment text required'}), 400
+            
+            # Use intelligent segmentation
+            segments = tagger.segment_comment(comment_text, asana_date)
+            
+            # Get tag suggestions for each segment
+            for segment in segments:
+                segment['suggested_tags'] = tagger.suggest_tags_for_segment(segment['text'])
+            
+            return jsonify({
+                'success': True,
+                'segments': segments,
+                'session_id': session_id
+            })
+        
+        elif operation == 'load_project_comments':
             # Load all tasks and comments for a project
             project_gid = form_data.get('project_gid')
             if not project_gid:
@@ -547,7 +625,10 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
                         segments = tagger.segment_comment(comment_text, asana_date)
                         
                         # Get tag suggestions for the first segment
-                        suggestions = tagger.suggest_tags(segments[0]['text'] if segments else comment_text)
+                        if segments:
+                            suggestions = tagger.suggest_tags_for_segment(segments[0]['text'])
+                        else:
+                            suggestions = []
                         
                         comments_to_tag.append({
                             'task_gid': task_gid,
@@ -587,7 +668,6 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
             story_gid = comment_data.get('story_gid')
             comment_text = comment_data.get('comment_text')
             segments = comment_data.get('segments', [])
-            assigned_tags = comment_data.get('assigned_tags', [])
             
             if not story_gid or not comment_text:
                 return jsonify({'error': 'Missing required data'}), 400
@@ -596,13 +676,17 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
             if segments:
                 tagger.save_segmentation_training(comment_text, segments)
             
-            if assigned_tags:  # Only save if tags were assigned
-                # Learn from the tagging
-                tagger.learn_from_tagging(comment_text, assigned_tags)
-                
+            # Learn from each tagged segment
+            all_tags = []
+            for segment in segments:
+                if 'tags' in segment and segment['tags']:
+                    tagger.learn_from_tagging(segment['text'], segment['tags'])
+                    all_tags.extend(segment['tags'])
+            
+            if all_tags:  # Only save if tags were assigned
                 # Mark comment as tagged
                 tagger.tagged_comments[story_gid] = {
-                    'tags': assigned_tags,
+                    'tags': list(set(all_tags)),  # Unique tags across all segments
                     'segments': segments,
                     'tagged_at': datetime.now().isoformat(),
                     'comment_text': comment_text[:100]  # Store preview for reference
@@ -648,7 +732,7 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
                 'total_training_samples': len(tagger.training_data),
                 'total_segmentation_samples': len(tagger.segmentation_training),
                 'tag_usage': defaultdict(int),
-                'patterns_learned': {}
+                'model_accuracy': 0.0
             }
             
             # Count tag usage
@@ -656,17 +740,16 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
                 for tag in sample.get('tags', []):
                     stats['tag_usage'][tag] += 1
             
-            # Summarize patterns
-            for tag, patterns in tagger.patterns.items():
-                top_keywords = sorted(
-                    patterns.get('keywords', {}).items(), 
-                    key=lambda x: x[1], 
-                    reverse=True
-                )[:5]
-                stats['patterns_learned'][tag] = {
-                    'top_keywords': top_keywords,
-                    'total_patterns': len(patterns.get('keywords', {})) + len(patterns.get('phrases', {}))
-                }
+            # Calculate model accuracy if we have enough data
+            if len(tagger.training_data) > 10:
+                # Simple accuracy based on how often top suggestion matches actual tags
+                correct = 0
+                total = min(20, len(tagger.training_data))  # Sample last 20
+                for sample in tagger.training_data[-total:]:
+                    suggestions = tagger.suggest_tags_for_segment(sample['comment'])
+                    if suggestions and suggestions[0]['tag'] in sample['tags']:
+                        correct += 1
+                stats['model_accuracy'] = (correct / total) * 100
             
             return jsonify({
                 'success': True,

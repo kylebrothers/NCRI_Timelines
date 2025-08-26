@@ -172,13 +172,17 @@ class CommentSegmenter:
                 return True
         
         # Check for explicit dates using dateparser
-        # Look for common date patterns
+        # Look for common date patterns - ORDER MATTERS (most specific first)
         date_patterns = [
-            r'\d{1,2}/\d{1,2}/\d{2,4}',  # MM/DD/YYYY or MM/DD/YY
-            r'\d{1,2}-\d{1,2}-\d{2,4}',   # MM-DD-YYYY
-            r'\d{4}-\d{1,2}-\d{1,2}',     # YYYY-MM-DD
-            r'\d{1,2}\.\d{1,2}\.\d{2,4}', # MM.DD.YYYY
-            r'\d{1,2}/\d{1,2}',           # MM/DD (no year)
+            r'\d{4}-\d{1,2}-\d{1,2}',     # YYYY-MM-DD (ISO format) - MUST BE FIRST
+            r'\d{4}/\d{1,2}/\d{1,2}',     # YYYY/MM/DD
+            r'\d{4}\.\d{1,2}\.\d{1,2}',   # YYYY.MM.DD
+            r'\d{1,2}/\d{1,2}/\d{4}',     # MM/DD/YYYY
+            r'\d{1,2}-\d{1,2}-\d{4}',     # MM-DD-YYYY
+            r'\d{1,2}\.\d{1,2}\.\d{4}',   # MM.DD.YYYY
+            r'\d{1,2}/\d{1,2}/\d{2}(?!\d)',   # MM/DD/YY (ensure not part of YYYY)
+            r'\d{1,2}-\d{1,2}-\d{2}(?!\d)',   # MM-DD-YY
+            r'\d{1,2}/\d{1,2}(?!/)',          # MM/DD (no year)
             r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}',  # Month DD
             r'\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)',  # DD Month
         ]
@@ -624,11 +628,15 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
                         # Use intelligent segmentation
                         segments = tagger.segment_comment(comment_text, asana_date)
                         
-                        # Get tag suggestions for the first segment
-                        if segments:
-                            suggestions = tagger.suggest_tags_for_segment(segments[0]['text'])
-                        else:
-                            suggestions = []
+                        # Get tag suggestions for each segment
+                        for segment in segments:
+                            suggestions = tagger.suggest_tags_for_segment(segment['text'])
+                            segment['suggested_tags'] = suggestions
+                            logger.info(f"Segment suggestions: {len(suggestions)} tags suggested")
+                        
+                        # Also get suggestions for the whole comment (backwards compatibility)
+                        overall_suggestions = tagger.suggest_tags_for_segment(comment_text)
+                        logger.info(f"Overall suggestions for comment: {len(overall_suggestions)} tags")
                         
                         comments_to_tag.append({
                             'task_gid': task_gid,
@@ -638,7 +646,7 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
                             'segments': segments,
                             'created_at': story.get('created_at'),
                             'created_by': story.get('created_by', {}).get('name', 'Unknown'),
-                            'suggested_tags': suggestions
+                            'suggested_tags': overall_suggestions  # Keep for backwards compatibility
                         })
             
             # Count already tagged comments for stats

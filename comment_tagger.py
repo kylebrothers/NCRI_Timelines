@@ -432,11 +432,6 @@ class TagSuggester:
             logger.error(f"Error suggesting tags: {e}")
         
         return []
-            
-        except Exception as e:
-            logger.error(f"Error suggesting tags: {e}")
-        
-        return []
 
 
 class CommentTagger:

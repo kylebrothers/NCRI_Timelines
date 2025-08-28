@@ -329,8 +329,8 @@ class CommentSegmenter:
             )
             if parsed_date and parsed_date.date() <= datetime.now().date():
                 return parsed_date.strftime('%Y-%m-%d')
-        except:
-            pass
+        except Exception as e:
+            logger.debug(f"Dateparser fallback failed: {e}")
         
         # Default to asana date or today
         return asana_date or datetime.now().strftime('%Y-%m-%d')

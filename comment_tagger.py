@@ -8,6 +8,7 @@ import re
 import logging
 import spacy
 import dateparser
+from dateparser.search import search_dates
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Any
@@ -146,6 +147,7 @@ class CommentSegmenter:
         Check if segment contains:
         - An explicit date (equal to or before asana_date)
         - Time references to present/past (today, yesterday, X days/weeks ago, etc.)
+        Uses dateparser's search_dates to find dates including period-separated formats
         """
         # Quick length check - very short segments unlikely to have dates
         if len(segment_text) < 3:
@@ -169,7 +171,41 @@ class CommentSegmenter:
                 logger.debug(f"Found time pattern '{pattern}' in segment")
                 return True
         
-        # Use SpaCy to find DATE entities
+        # Parse asana_date to use as reference
+        reference_date = None
+        if asana_date:
+            try:
+                reference_date = dateparser.parse(asana_date)
+            except:
+                reference_date = None
+        
+        # Use dateparser's search_dates to find any dates in the text
+        # This should catch period-separated dates and other formats
+        try:
+            dates_found = search_dates(
+                segment_text,
+                languages=['en'],
+                settings={
+                    'PREFER_DATES_FROM': 'past',
+                    'RELATIVE_BASE': reference_date or datetime.now(),
+                    'DATE_ORDER': 'MDY',  # Try MDY first (common for period-separated US dates)
+                }
+            )
+            
+            if dates_found:
+                # Check if any found date is in the past
+                for date_string, date_value in dates_found:
+                    if reference_date:
+                        if date_value <= reference_date:
+                            logger.debug(f"search_dates found valid past date: {date_string}")
+                            return True
+                    elif date_value <= datetime.now():
+                        logger.debug(f"search_dates found valid past date: {date_string}")
+                        return True
+        except Exception as e:
+            logger.debug(f"search_dates failed: {e}")
+        
+        # Fallback to SpaCy NER if search_dates didn't find anything
         if self.nlp:
             try:
                 doc = self.nlp(segment_text[:1000])  # Limit text length for SpaCy
@@ -182,14 +218,14 @@ class CommentSegmenter:
                                 settings={
                                     'PREFER_DATES_FROM': 'past',
                                     'STRICT_PARSING': False,
-                                    'DATE_ORDER': 'YMD'  # Prefer YYYY-MM-DD format
+                                    'RELATIVE_BASE': reference_date or datetime.now(),
+                                    'DATE_ORDER': 'MDY'
                                 }
                             )
                             if parsed_date:
                                 # Check if it's in the past
-                                if asana_date:
-                                    asana_datetime = dateparser.parse(asana_date)
-                                    if asana_datetime and parsed_date <= asana_datetime:
+                                if reference_date:
+                                    if parsed_date <= reference_date:
                                         logger.debug(f"SpaCy found valid past date: {ent.text}")
                                         return True
                                 elif parsed_date <= datetime.now():
@@ -280,54 +316,89 @@ class CommentSegmenter:
         """
         Extract the most relevant date from a segment using SpaCy and dateparser.
         Returns YYYY-MM-DD format.
+        Uses asana_date as the reference point for relative dates.
         """
-        # First check for relative date phrases
+        # Parse asana_date to use as reference
+        reference_date = datetime.now()
+        if asana_date:
+            try:
+                parsed_ref = dateparser.parse(asana_date)
+                if parsed_ref:
+                    reference_date = parsed_ref
+                    logger.debug(f"Using asana_date {asana_date} as reference: {reference_date}")
+            except Exception as e:
+                logger.warning(f"Could not parse asana_date {asana_date}: {e}")
+        
         segment_lower = segment_text.lower()
         
+        # Check for relative date phrases using reference_date
         if 'today' in segment_lower:
-            return datetime.now().strftime('%Y-%m-%d')
+            return reference_date.strftime('%Y-%m-%d')
         elif 'yesterday' in segment_lower:
-            return (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+            return (reference_date - timedelta(days=1)).strftime('%Y-%m-%d')
         
-        # Use SpaCy to find date entities
+        # Use dateparser's search_dates to find dates including period-separated formats
+        try:
+            dates_found = search_dates(
+                segment_text,
+                languages=['en'],
+                settings={
+                    'PREFER_DATES_FROM': 'past',
+                    'RELATIVE_BASE': reference_date,
+                    'DATE_ORDER': 'MDY',  # Try MDY first for period-separated US dates
+                    'PREFER_DAY_OF_MONTH': 'first',
+                }
+            )
+            
+            if dates_found:
+                # Return the first valid past date found
+                for date_string, date_value in dates_found:
+                    if date_value.date() <= reference_date.date():
+                        logger.debug(f"Extracted date '{date_string}' as {date_value.strftime('%Y-%m-%d')}")
+                        return date_value.strftime('%Y-%m-%d')
+        except Exception as e:
+            logger.debug(f"search_dates failed in extract_segment_date: {e}")
+        
+        # Fallback to SpaCy NER
         if self.nlp:
             try:
                 doc = self.nlp(segment_text[:1000])
                 for ent in doc.ents:
                     if ent.label_ in ['DATE']:
-                        # Try to parse the entity with dateparser
+                        # Try to parse the entity with dateparser using reference_date
                         try:
                             parsed_date = dateparser.parse(
                                 ent.text,
                                 settings={
                                     'PREFER_DATES_FROM': 'past',
                                     'STRICT_PARSING': False,
-                                    'DATE_ORDER': 'YMD',  # Prefer YYYY-MM-DD interpretation
-                                    'PREFER_DAY_OF_MONTH': 'first',  # For ambiguous dates
+                                    'RELATIVE_BASE': reference_date,
+                                    'DATE_ORDER': 'MDY',
+                                    'PREFER_DAY_OF_MONTH': 'first',
                                 }
                             )
                             if parsed_date:
-                                # Validate the date is reasonable (not in future, not too far in past)
-                                if parsed_date.date() <= datetime.now().date():
-                                    logger.debug(f"Extracted date '{ent.text}' as {parsed_date.strftime('%Y-%m-%d')}")
+                                # Validate the date is reasonable (not in future relative to reference)
+                                if parsed_date.date() <= reference_date.date():
+                                    logger.debug(f"SpaCy extracted date '{ent.text}' as {parsed_date.strftime('%Y-%m-%d')}")
                                     return parsed_date.strftime('%Y-%m-%d')
                         except Exception as e:
                             logger.debug(f"Could not parse date entity '{ent.text}': {e}")
             except Exception as e:
                 logger.warning(f"SpaCy date extraction failed: {e}")
         
-        # Fallback: Try dateparser on the whole segment (last resort)
+        # Last resort: Try dateparser on the whole segment with reference_date
         try:
-            # Look for anything that might be a date
             parsed_date = dateparser.parse(
                 segment_text,
                 settings={
                     'PREFER_DATES_FROM': 'past',
-                    'STRICT_PARSING': True,  # Be strict to avoid false positives
-                    'DATE_ORDER': 'YMD'
+                    'STRICT_PARSING': False,  # Be less strict to catch more date formats
+                    'RELATIVE_BASE': reference_date,
+                    'DATE_ORDER': 'MDY'
                 }
             )
-            if parsed_date and parsed_date.date() <= datetime.now().date():
+            if parsed_date and parsed_date.date() <= reference_date.date():
                 return parsed_date.strftime('%Y-%m-%d')
         except Exception as e:
             logger.debug(f"Dateparser fallback failed: {e}")
@@ -686,106 +757,4 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
         
         elif operation == 'save_tagged_comment':
             # Save a single tagged comment and learn from it
-            comment_data = json.loads(form_data.get('comment_data', '{}'))
-            
-            story_gid = comment_data.get('story_gid')
-            comment_text = comment_data.get('comment_text')
-            segments = comment_data.get('segments', [])
-            
-            if not story_gid or not comment_text:
-                return jsonify({'error': 'Missing required data'}), 400
-            
-            # Save segmentation training data if user modified segments
-            if segments:
-                tagger.save_segmentation_training(comment_text, segments)
-            
-            # Learn from each tagged segment
-            all_tags = []
-            for segment in segments:
-                if 'tags' in segment and segment['tags']:
-                    tagger.learn_from_tagging(segment['text'], segment['tags'])
-                    all_tags.extend(segment['tags'])
-            
-            if all_tags:  # Only save if tags were assigned
-                # Mark comment as tagged
-                tagger.tagged_comments[story_gid] = {
-                    'tags': list(set(all_tags)),  # Unique tags across all segments
-                    'segments': segments,
-                    'tagged_at': datetime.now().isoformat(),
-                    'comment_text': comment_text[:100]  # Store preview for reference
-                }
-                
-                # Save the tagged comments registry
-                tagger.save_json("tagged_comments.json", tagger.tagged_comments)
-            
-            return jsonify({
-                'success': True,
-                'message': 'Comment tagged successfully',
-                'session_id': session_id
-            })
-        
-        elif operation == 'add_new_tag':
-            # Add a new tag definition
-            tag_id = form_data.get('tag_id')
-            tag_name = form_data.get('tag_name')
-            tag_description = form_data.get('tag_description', '')
-            
-            if not tag_id or not tag_name:
-                return jsonify({'error': 'Tag ID and name required'}), 400
-            
-            tagger.tag_definitions[tag_id] = {
-                'name': tag_name,
-                'description': tag_description,
-                'created_at': datetime.now().isoformat()
-            }
-            
-            tagger.save_json("tag_definitions.json", tagger.tag_definitions)
-            
-            return jsonify({
-                'success': True,
-                'message': f'Added new tag: {tag_name}',
-                'tag_id': tag_id,
-                'session_id': session_id
-            })
-        
-        elif operation == 'get_training_stats':
-            # Get statistics about training data
-            stats = {
-                'total_tags': len(tagger.tag_definitions),
-                'total_training_samples': len(tagger.training_data),
-                'total_segmentation_samples': len(tagger.segmentation_training),
-                'tag_usage': defaultdict(int),
-                'model_accuracy': 0.0
-            }
-            
-            # Count tag usage
-            for sample in tagger.training_data:
-                for tag in sample.get('tags', []):
-                    stats['tag_usage'][tag] += 1
-            
-            # Calculate model accuracy if we have enough data
-            if len(tagger.training_data) > 10:
-                # Simple accuracy based on how often top suggestion matches actual tags
-                correct = 0
-                total = min(20, len(tagger.training_data))  # Sample last 20
-                for sample in tagger.training_data[-total:]:
-                    suggestions = tagger.suggest_tags_for_segment(sample['comment'])
-                    if suggestions and suggestions[0]['tag'] in sample['tags']:
-                        correct += 1
-                stats['model_accuracy'] = float((correct / total) * 100)  # Convert to native Python float
-            
-            # Convert all NumPy types to native Python types for JSON serialization
-            stats['tag_usage'] = dict(stats['tag_usage'])  # Ensure it's a regular dict
-            
-            return jsonify({
-                'success': True,
-                'stats': stats,
-                'session_id': session_id
-            })
-        
-        else:
-            return jsonify({'error': f'Unknown operation: {operation}'}), 400
-    
-    except Exception as e:
-        logger.error(f"Error in comment tagger handler: {e}")
-        return jsonify({'error': str(e)}), 500
+            comment_data = json.loads

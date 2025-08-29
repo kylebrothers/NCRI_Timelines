@@ -757,4 +757,106 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
         
         elif operation == 'save_tagged_comment':
             # Save a single tagged comment and learn from it
-            comment_data = json.loads
+            comment_data = json.loads(form_data.get('comment_data', '{}'))
+            
+            story_gid = comment_data.get('story_gid')
+            comment_text = comment_data.get('comment_text')
+            segments = comment_data.get('segments', [])
+            
+            if not story_gid or not comment_text:
+                return jsonify({'error': 'Missing required data'}), 400
+            
+            # Save segmentation training data if user modified segments
+            if segments:
+                tagger.save_segmentation_training(comment_text, segments)
+            
+            # Learn from each tagged segment
+            all_tags = []
+            for segment in segments:
+                if 'tags' in segment and segment['tags']:
+                    tagger.learn_from_tagging(segment['text'], segment['tags'])
+                    all_tags.extend(segment['tags'])
+            
+            if all_tags:  # Only save if tags were assigned
+                # Mark comment as tagged
+                tagger.tagged_comments[story_gid] = {
+                    'tags': list(set(all_tags)),  # Unique tags across all segments
+                    'segments': segments,
+                    'tagged_at': datetime.now().isoformat(),
+                    'comment_text': comment_text[:100]  # Store preview for reference
+                }
+                
+                # Save the tagged comments registry
+                tagger.save_json("tagged_comments.json", tagger.tagged_comments)
+            
+            return jsonify({
+                'success': True,
+                'message': 'Comment tagged successfully',
+                'session_id': session_id
+            })
+        
+        elif operation == 'add_new_tag':
+            # Add a new tag definition
+            tag_id = form_data.get('tag_id')
+            tag_name = form_data.get('tag_name')
+            tag_description = form_data.get('tag_description', '')
+            
+            if not tag_id or not tag_name:
+                return jsonify({'error': 'Tag ID and name required'}), 400
+            
+            tagger.tag_definitions[tag_id] = {
+                'name': tag_name,
+                'description': tag_description,
+                'created_at': datetime.now().isoformat()
+            }
+            
+            tagger.save_json("tag_definitions.json", tagger.tag_definitions)
+            
+            return jsonify({
+                'success': True,
+                'message': f'Added new tag: {tag_name}',
+                'tag_id': tag_id,
+                'session_id': session_id
+            })
+        
+        elif operation == 'get_training_stats':
+            # Get statistics about training data
+            stats = {
+                'total_tags': len(tagger.tag_definitions),
+                'total_training_samples': len(tagger.training_data),
+                'total_segmentation_samples': len(tagger.segmentation_training),
+                'tag_usage': defaultdict(int),
+                'model_accuracy': 0.0
+            }
+            
+            # Count tag usage
+            for sample in tagger.training_data:
+                for tag in sample.get('tags', []):
+                    stats['tag_usage'][tag] += 1
+            
+            # Calculate model accuracy if we have enough data
+            if len(tagger.training_data) > 10:
+                # Simple accuracy based on how often top suggestion matches actual tags
+                correct = 0
+                total = min(20, len(tagger.training_data))  # Sample last 20
+                for sample in tagger.training_data[-total:]:
+                    suggestions = tagger.suggest_tags_for_segment(sample['comment'])
+                    if suggestions and suggestions[0]['tag'] in sample['tags']:
+                        correct += 1
+                stats['model_accuracy'] = float((correct / total) * 100)  # Convert to native Python float
+            
+            # Convert all NumPy types to native Python types for JSON serialization
+            stats['tag_usage'] = dict(stats['tag_usage'])  # Ensure it's a regular dict
+            
+            return jsonify({
+                'success': True,
+                'stats': stats,
+                'session_id': session_id
+            })
+        
+        else:
+            return jsonify({'error': f'Unknown operation: {operation}'}), 400
+    
+    except Exception as e:
+        logger.error(f"Error in comment tagger handler: {e}")
+        return jsonify({'error': str(e)}), 500

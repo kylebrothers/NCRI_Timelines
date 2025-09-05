@@ -12,6 +12,7 @@ import json
 from config import create_app, setup_logging, setup_rate_limiter, ensure_directories
 from asana_client import AsanaClient
 from file_processors import process_uploaded_file, validate_file, load_server_files
+from tag_manager import handle_tag_manager_page
 from page_handlers import (
     handle_project_finder_page,
     handle_project_dashboard_page,

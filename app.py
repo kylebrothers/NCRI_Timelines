@@ -185,6 +185,10 @@ def generic_api(page_name):
             return handle_segmentation_trainer_page(
                 page_name, form_data, session_id, asana_client
             )
+        elif page_type == 'tag-manager':
+            return handle_tag_manager_page(
+                page_name, form_data, session_id, asana_client
+            )
         else:
             return jsonify({'error': f'Unknown page type: {page_type}'}), 400
     
@@ -281,6 +285,16 @@ def get_page_configuration(page_name):
         'segmentation-trainer': {  # Support both naming conventions
             'page_type': 'segmentation-trainer',
             'load_server_files': True,
+            'preload_asana_data': []
+        },
+        'tag_manager': {
+            'page_type': 'tag-manager',
+            'load_server_files': False,
+            'preload_asana_data': []
+        },
+        'tag-manager': {  # Support both naming conventions
+            'page_type': 'tag-manager',
+            'load_server_files': False,
             'preload_asana_data': []
         }
     }

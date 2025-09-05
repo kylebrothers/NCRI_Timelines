@@ -151,9 +151,19 @@ def handle_segmentation_trainer_page(page_name, form_data, session_id, asana_cli
             tasks = asana_client.get_project_tasks(project_gid)
             logger.info(f"Fetched {len(tasks)} tasks in {time.time() - tasks_start:.2f}s")
             
+            # Load tagged comments from comment tagger to exclude them
+            tagged_comments_path = "/app/server_files/comment_tagger/tagged_comments.json"
+            if os.path.exists(tagged_comments_path):
+                with open(tagged_comments_path, 'r') as f:
+                    tagged_comments = json.load(f)
+                logger.info(f"Loaded {len(tagged_comments)} tagged comments to exclude")
+            else:
+                tagged_comments = {}
+            
             comments_for_training = []
             total_comments_checked = 0
             total_already_processed = 0
+            total_already_tagged = 0
             
             # Limit to 50 unprocessed comments
             MAX_COMMENTS = 50
@@ -192,7 +202,12 @@ def handle_segmentation_trainer_page(page_name, form_data, session_id, asana_cli
                         story_gid = story.get('gid')
                         total_comments_checked += 1
                         
-                        # Skip if already processed
+                        # Skip if already tagged in comment tagger
+                        if story_gid in tagged_comments:
+                            total_already_tagged += 1
+                            continue
+                        
+                        # Skip if already processed in segmentation trainer
                         if trainer.is_comment_processed(story_gid):
                             total_already_processed += 1
                             continue
@@ -226,6 +241,7 @@ def handle_segmentation_trainer_page(page_name, form_data, session_id, asana_cli
                 - Comments loaded: {len(comments_for_training)}
                 - Comments checked: {total_comments_checked}
                 - Already processed: {total_already_processed}
+                - Already tagged: {total_already_tagged}
             """)
             
             return jsonify({
@@ -237,6 +253,7 @@ def handle_segmentation_trainer_page(page_name, form_data, session_id, asana_cli
                 'comments': comments_for_training,
                 'total_unprocessed': len(comments_for_training),
                 'total_processed': len(trainer.processed_comments),
+                'total_tagged': total_already_tagged,
                 'batch_size': MAX_COMMENTS,
                 'message': f"Loaded {len(comments_for_training)} comments (max {MAX_COMMENTS} per session)",
                 'session_id': session_id

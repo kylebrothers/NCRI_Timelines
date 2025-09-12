@@ -367,6 +367,161 @@ def handle_comment_tagger_page(page_name, form_data, session_id, asana_client):
                 'session_id': session_id
             })
         
+        elif operation == 'get_progress_stats':
+            # Get comprehensive progress statistics
+            project_gid = form_data.get('project_gid')
+            
+            # Load all relevant data files
+            tagged_comments = tagger.tagged_comments
+            segmentation_training = tagger.segmentation_training
+            training_data = tagger.training_data
+            
+            # Also load segmentation trainer data if available
+            seg_trainer_path = "/app/server_files/segmentation_trainer"
+            seg_processed_comments = {}
+            seg_training_data = []
+            
+            try:
+                seg_processed_path = os.path.join(seg_trainer_path, "processed_comments.json")
+                if os.path.exists(seg_processed_path):
+                    with open(seg_processed_path, 'r') as f:
+                        seg_processed_comments = json.load(f)
+                
+                seg_training_path = os.path.join(seg_trainer_path, "segmentation_training.json")
+                if os.path.exists(seg_training_path):
+                    with open(seg_training_path, 'r') as f:
+                        seg_training_data = json.load(f)
+            except Exception as e:
+                logger.warning(f"Could not load segmentation trainer data: {e}")
+            
+            # Calculate statistics
+            stats = {
+                'total_comments_in_project': 0,  # Would need project access to get true total
+                'comments_tagged': len(tagged_comments),
+                'comments_segmentation_reviewed': len(seg_processed_comments),
+                'comments_segmentation_confirmed': 0,
+                'comments_segmentation_corrected': 0,
+                'segmentation_accuracy': 0.0,
+                'total_segments_tagged': 0,
+                'total_tags_applied': 0,
+                'unique_tags_used': set(),
+                'comments_with_auto_tags': 0,
+                'segments_by_count': defaultdict(int),  # Distribution of segment counts
+                'tag_frequency': defaultdict(int),
+                'timeline': {
+                    'earliest_activity': None,
+                    'latest_activity': None,
+                    'daily_activity': defaultdict(int)
+                }
+            }
+            
+            # Process segmentation training data
+            for sample in seg_training_data:
+                if not sample.get('was_corrected', True):
+                    stats['comments_segmentation_confirmed'] += 1
+                else:
+                    stats['comments_segmentation_corrected'] += 1
+                
+                # Track segment counts
+                if 'corrected_segments' in sample:
+                    segment_count = len(sample['corrected_segments'])
+                    stats['segments_by_count'][segment_count] += 1
+                
+                # Track timeline
+                if 'timestamp' in sample:
+                    try:
+                        timestamp = datetime.fromisoformat(sample['timestamp'].replace('Z', '+00:00'))
+                        date_key = timestamp.strftime('%Y-%m-%d')
+                        stats['timeline']['daily_activity'][date_key] += 1
+                        
+                        if stats['timeline']['earliest_activity'] is None or timestamp < datetime.fromisoformat(stats['timeline']['earliest_activity']):
+                            stats['timeline']['earliest_activity'] = sample['timestamp']
+                        if stats['timeline']['latest_activity'] is None or timestamp > datetime.fromisoformat(stats['timeline']['latest_activity']):
+                            stats['timeline']['latest_activity'] = sample['timestamp']
+                    except:
+                        pass
+            
+            # Calculate segmentation accuracy
+            total_reviewed = stats['comments_segmentation_confirmed'] + stats['comments_segmentation_corrected']
+            if total_reviewed > 0:
+                stats['segmentation_accuracy'] = (stats['comments_segmentation_confirmed'] / total_reviewed) * 100
+            
+            # Process tagged comments
+            for story_gid, comment_data in tagged_comments.items():
+                # Count segments and tags
+                if 'segments' in comment_data:
+                    stats['total_segments_tagged'] += len(comment_data['segments'])
+                    
+                    for segment in comment_data['segments']:
+                        if 'tags' in segment and segment['tags']:
+                            stats['total_tags_applied'] += len(segment['tags'])
+                            for tag in segment['tags']:
+                                stats['unique_tags_used'].add(tag)
+                                stats['tag_frequency'][tag] += 1
+                
+                # Check if any segments had auto-selected tags
+                if 'segments' in comment_data:
+                    has_auto = any(
+                        any(sugg.get('auto_select', False) for sugg in seg.get('suggested_tags', []))
+                        for seg in comment_data['segments']
+                    )
+                    if has_auto:
+                        stats['comments_with_auto_tags'] += 1
+            
+            # Convert sets to lists for JSON serialization
+            stats['unique_tags_used'] = list(stats['unique_tags_used'])
+            stats['unique_tags_count'] = len(stats['unique_tags_used'])
+            
+            # Convert defaultdicts to regular dicts
+            stats['segments_by_count'] = dict(stats['segments_by_count'])
+            stats['tag_frequency'] = dict(stats['tag_frequency'])
+            stats['timeline']['daily_activity'] = dict(stats['timeline']['daily_activity'])
+            
+            # Calculate auto-tagging accuracy (approximate)
+            if stats['comments_tagged'] > 0:
+                stats['auto_tagging_rate'] = (stats['comments_with_auto_tags'] / stats['comments_tagged']) * 100
+            else:
+                stats['auto_tagging_rate'] = 0.0
+            
+            # Get project-specific stats if project_gid provided
+            if project_gid and asana_client and asana_client.is_connected():
+                try:
+                    # Get total tasks in project
+                    tasks = asana_client.get_project_tasks(project_gid)
+                    total_comments_estimate = 0
+                    
+                    # This is an estimate - we'd need to fetch all stories to get exact count
+                    # For now, estimate based on task count
+                    stats['total_tasks_in_project'] = len(tasks)
+                    stats['estimated_total_comments'] = len(tasks) * 3  # Rough estimate
+                    
+                    # Calculate completion percentage
+                    if stats['estimated_total_comments'] > 0:
+                        stats['tagging_completion_rate'] = (stats['comments_tagged'] / stats['estimated_total_comments']) * 100
+                        stats['segmentation_review_rate'] = (stats['comments_segmentation_reviewed'] / stats['estimated_total_comments']) * 100
+                    else:
+                        stats['tagging_completion_rate'] = 0.0
+                        stats['segmentation_review_rate'] = 0.0
+                        
+                except Exception as e:
+                    logger.warning(f"Could not fetch project stats: {e}")
+                    stats['project_error'] = str(e)
+            
+            # Add summary metrics
+            stats['summary'] = {
+                'total_processed': stats['comments_tagged'] + stats['comments_segmentation_reviewed'],
+                'segmentation_quality': f"{stats['segmentation_accuracy']:.1f}%",
+                'average_segments_per_comment': stats['total_segments_tagged'] / stats['comments_tagged'] if stats['comments_tagged'] > 0 else 0,
+                'average_tags_per_segment': stats['total_tags_applied'] / stats['total_segments_tagged'] if stats['total_segments_tagged'] > 0 else 0,
+                'most_used_tags': sorted(stats['tag_frequency'].items(), key=lambda x: x[1], reverse=True)[:10]
+            }
+            
+            return jsonify({
+                'success': True,
+                'stats': stats,
+                'session_id': session_id
+            })
+        
         else:
             return jsonify({'error': f'Unknown operation: {operation}'}), 400
     
